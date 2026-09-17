@@ -1,18 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { Api, FilePage, FileReference, Project, Task, Run, RollbackPreview } from '../shared/types';
 import { busyStatuses } from '../shared/types';
+import { FileTree } from './file-tree';
 const api: Api = window.localCode;
 export const modeLabels = { execute: '执行', plan: '计划', review: '审查' };
 export function FilePicker({ project, initialPath, close, choose }: { project: Project; initialPath?: string; close: () => void; choose: (r: FileReference) => void }) {
-  const [query, setQuery] = useState(''), [paths, setPaths] = useState<string[]>([]), [truncated, setTruncated] = useState(false);
   const [page, setPage] = useState<FilePage>(), [error, setError] = useState(''), [loading, setLoading] = useState(false);
   const [start, setStart] = useState(1), [end, setEnd] = useState(1);
   const request = useRef(0);
-  useEffect(() => {
-    let valid = true;
-    const timer = setTimeout(() => api.searchFiles({ projectId: project.id, query }).then(r => { if (valid) { setPaths(r.paths); setTruncated(r.truncated); } }).catch(e => { if (valid) setError(e.message); }), 180);
-    return () => { valid = false; clearTimeout(timer); };
-  }, [project.id, query]);
   async function preview(path: string, startLine = 1, select = true) {
     const id = ++request.current; setLoading(true); setError('');
     try { const p = await api.previewFile({ projectId: project.id, path, startLine }); if (id !== request.current) return; setPage(p); if (select) { setStart(p.startLine); setEnd(p.endLine); } }
@@ -22,7 +17,7 @@ export function FilePicker({ project, initialPath, close, choose }: { project: P
   useEffect(() => { if (initialPath) void preview(initialPath); return () => { request.current++; }; }, []);
   return <div className="modal-backdrop"><section className="reference-modal" role="dialog" aria-modal="true" aria-label="文件引用与预览">
     <header><div><strong>引用项目文件</strong><small title={project.path}>{project.name} · {project.path}</small></div><button onClick={close}>关闭</button></header>
-    <div className="reference-content"><div className="reference-search"><input autoFocus aria-label="搜索项目文件" placeholder="搜索文件名或相对路径" value={query} onChange={e => setQuery(e.target.value)}/><div>{paths.map(p => <button className={page?.path === p ? 'selected' : ''} key={p} title={project.path + '/' + p} onClick={() => preview(p)}>{p}</button>)}{truncated && <p>搜索结果达到上限，请缩小查询范围。</p>}</div></div>
+    <div className="reference-content"><FileTree key={project.id} project={project} selected={page?.path} initialPath={initialPath} preview={preview}/>
     <div className="file-preview">{page ? <><strong title={project.path}>{page.path}</strong><small>第 {page.startLine}–{page.endLine} 行 / 共 {page.totalLines} 行 · 只读预览</small><pre>{page.content.split('\n').map((line, i) => <button key={page.startLine + i} className={page.startLine + i >= start && page.startLine + i <= end ? 'selected' : ''} onClick={e => { const n = page.startLine + i; if (e.shiftKey) { setStart(Math.min(start, n)); setEnd(Math.max(start, n)); } else { setStart(n); setEnd(n); } }}><span>{page.startLine + i}</span>{line || ' '}</button>)}</pre><div className="preview-pages"><button disabled={loading || page.startLine === 1} onClick={() => preview(page.path, Math.max(1, page.startLine - 100), false)}>上一页</button><span>{page.hasMore ? '后面还有内容，未全部显示' : '已到文件末尾'}</span><button disabled={loading || !page.hasMore} onClick={() => preview(page.path, page.endLine + 1, false)}>下一页</button></div></> : <p>{loading ? '读取中…' : '选择左侧文件查看真实内容'}</p>}</div></div>
     {error && <p role="alert" className="reference-error">{error}</p>}<footer><span>点击行号选择，Shift 点击扩展范围。</span><label>起始行<input aria-label="引用起始行" type="number" min={1} value={start} onChange={e => setStart(Number(e.target.value))}/></label><label>结束行<input aria-label="引用结束行" type="number" min={start} value={end} onChange={e => setEnd(Number(e.target.value))}/></label><button className="primary" disabled={loading || !page || !Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || end > page.totalLines || end - start >= 400} onClick={() => { if (page) choose({ projectId: project.id, path: page.path, startLine: start, endLine: end, version: page.version }); }}>添加引用</button></footer>
   </section></div>;

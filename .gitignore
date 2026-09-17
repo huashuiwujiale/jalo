@@ -20,3 +20,5 @@ recovery/
 .cache/
 *.tmp
 *.swp
+
+release/

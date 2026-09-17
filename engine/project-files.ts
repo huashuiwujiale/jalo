@@ -25,6 +25,20 @@ export async function searchFiles(root: string, query: string) {
   }
   await walk(); return { paths, truncated };
 }
+export async function listDirectory(root: string, directory = '.') {
+  const tools = await projectFiles(root);
+  const entries: { path: string; name: string; directory: boolean }[] = [];
+  // Read only the requested directory. Never recursively enumerate dependencies.
+  const handle = await fs.opendir(await tools.resolve(directory));
+  let truncated = false;
+  for await (const entry of handle) {
+    if (entry.isSymbolicLink() || entry.name === '.git' || (!entry.isFile() && !entry.isDirectory())) continue;
+    if (entries.length >= 1000) { truncated = true; break; }
+    entries.push({ path: path.join(directory, entry.name), name: entry.name, directory: entry.isDirectory() });
+  }
+  entries.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
+  return { entries, truncated };
+}
 export async function previewFile(root: string, file: string, startLine = 1): Promise<FilePage> {
   const tools = await projectFiles(root), text = await tools.read(await tools.resolve(file));
   const lines = text.split('\n');

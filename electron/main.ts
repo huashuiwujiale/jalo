@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { captureReferences, previewFile, searchFiles, rollbackPreview, restoreFile } from '../engine/project-files';
+import { captureReferences, previewFile, searchFiles, listDirectory, rollbackPreview, restoreFile } from '../engine/project-files';
 import { createTwoFilesPatch } from 'diff';
 import { Store } from './store';
 import { LMStudioProvider } from '../engine/provider';
@@ -17,7 +17,7 @@ const upgradingLegacy = existsSync(path.join(legacyDataPath, 'local-code.sqlite'
 app.setName(upgradingLegacy ? 'Local Code' : 'Jalo');
 app.setPath('userData', upgradingLegacy ? legacyDataPath : path.join(app.getPath('appData'), 'Jalo'));
 app.setAboutPanelOptions({ applicationName: 'Jalo', applicationVersion: '0.2.0', authors: ['佳乐 (Jiale)'] });
-const developmentUrl = process.env.LOCAL_CODE_DEV_URL;
+const developmentUrl = app.isPackaged ? undefined : process.env.LOCAL_CODE_DEV_URL;
 let win: BrowserWindow | undefined, store: Store;
 let tasks: Task[] = [];
 let active: { task: Task; worker: UtilityProcess; timer?: ReturnType<typeof setTimeout>; pids: Set<number> } | undefined;
@@ -137,6 +137,7 @@ function registerApi() {
   });
   const projectById = (id: string) => { const p = store.projects().find(p => p.id === id); if (!p) throw new Error('项目不存在'); return p; };
   register('files:search', async (raw: unknown) => { const v = z.object({ projectId: uuid, query: z.string().max(200) }).strict().parse(raw); return searchFiles(projectById(v.projectId).path, v.query); });
+  register('files:list', async (raw: unknown) => { const v = z.object({ projectId: uuid, path: z.string().min(1).max(1024) }).strict().parse(raw); return listDirectory(projectById(v.projectId).path, v.path); });
   register('files:preview', async (raw: unknown) => { const v = z.object({ projectId: uuid, path: z.string().min(1).max(1024), startLine: z.number().int().min(1).optional() }).strict().parse(raw); return previewFile(projectById(v.projectId).path, v.path, v.startLine); });
   const locateRun = (taskId: string, runId: string) => { const task = tasks.find(t => t.id === taskId); const run = task?.runs?.find(r => r.id === runId); if (!task || !run) throw new Error('历史数据缺少轮次核验，无法进行此操作'); return { task, run }; };
   register('runs:changes', (raw: unknown) => { const v = z.object({ taskId: uuid, runId: uuid }).strict().parse(raw); return locateRun(v.taskId, v.runId).run.changes; });
@@ -231,8 +232,11 @@ async function createWindow() {
   win.webContents.on('will-navigate', event => event.preventDefault());
   win.webContents.on('will-attach-webview', event => event.preventDefault());
   win.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-  if (!developmentUrl || new URL(developmentUrl).hostname !== '127.0.0.1') throw new Error('请使用 npm run dev 启动开发版');
-  await win.loadURL(developmentUrl);
+  if (app.isPackaged) await win.loadFile(path.join(__dirname, '../renderer/index.html'));
+  else {
+    if (!developmentUrl || new URL(developmentUrl).hostname !== '127.0.0.1') throw new Error('请使用 npm run dev 启动开发版');
+    await win.loadURL(developmentUrl);
+  }
 }
 if (!app.requestSingleInstanceLock()) app.quit();
 else {

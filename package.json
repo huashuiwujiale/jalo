@@ -16,7 +16,9 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "test": "tsx --test tests/*.test.ts",
-    "test:live": "tsx scripts/live.ts"
+    "test:live": "tsx scripts/live.ts",
+    "build": "node scripts/build.mjs",
+    "dist:mac": "npm run build && electron-builder --mac dmg --arm64 --publish never"
   },
   "engines": {
     "node": ">=22.14"
@@ -40,6 +42,8 @@
     "@types/react-dom": "^19.1.0",
     "@types/sql.js": "^1.4.9",
     "electron": "^38.0.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "vite": "^7.1.0"

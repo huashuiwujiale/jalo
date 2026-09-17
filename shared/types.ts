@@ -56,6 +56,7 @@ export interface Api {
   unloadModel(instance: string): Promise<void>;
   submit(input: SubmitInput): Promise<string>;
   searchFiles(input: { projectId: string; query: string }): Promise<{ paths: string[]; truncated: boolean }>;
+  listDirectory(input: { projectId: string; path: string }): Promise<{ entries: { path: string; name: string; directory: boolean }[]; truncated: boolean }>;
   previewFile(input: { projectId: string; path: string; startLine?: number }): Promise<FilePage>;
   runChanges(taskId: string, runId: string): Promise<RunChange[]>;
   previewRollback(taskId: string, runId: string, path: string): Promise<RollbackPreview>;

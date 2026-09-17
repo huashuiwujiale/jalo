@@ -39,6 +39,20 @@ html, body, #root { width: 100%; height: 100%; overflow: hidden; }
 .reference-search>div { overflow:auto; }
 .reference-search button { display:block;text-align:left;width:100%;padding:8px;overflow-wrap:anywhere;font-size:12px; }
 .reference-search button.selected,.file-preview button.selected { background:#dcece2; }
+.tree-filter { display:flex;align-items:center;gap:8px;border:1px solid #dce2df;border-radius:9px;padding:0 9px;margin-bottom:10px;color:#84938c; }
+.tree-filter input { min-width:0;width:100%;border:0;background:transparent;padding:9px 0;outline:none; }
+.tree-filter:focus-within { border-color:#58977b;box-shadow:0 0 0 2px #58977b22; }
+.reference-search .file-tree { flex:1;min-height:0;overflow:auto;overscroll-behavior:contain; }
+.tree-branch { list-style:none;margin:0;padding:0; }
+.reference-search .tree-row { display:flex;align-items:center;justify-content:flex-start;gap:6px;width:100%;min-height:32px;border-radius:5px;white-space:nowrap;overflow:hidden; }
+.tree-row svg,.tree-indent { flex:none; }
+.tree-indent { width:14px; }
+.tree-name { overflow:hidden;text-overflow:ellipsis; }
+.tree-row:hover { background:#e8eeea; }
+.tree-row:focus-visible { outline:2px solid #58977b;outline-offset:-2px; }
+.file-icon { color:#929c97; }.file-icon.json { color:#bf8b43; }.file-icon.ts,.file-icon.tsx,.file-icon.jsx { color:#438ead; }.file-icon.vue,.file-icon.text { color:#569b75; }.file-icon.css { color:#9472b4; }
+.tree-feedback { padding:6px 12px;font-size:12px;color:#7c8982;overflow-wrap:anywhere; }
+.tree-note { padding-top:10px;color:#8c9891;font-size:10px; }
 .file-preview { min-width:0;min-height:0;display:flex;flex-direction:column;padding:12px;gap:8px; }
 .file-preview pre { overflow:auto;flex:1;margin:0;background:white;border:1px solid #dce2df; }
 .file-preview pre button { display:block;white-space:pre;text-align:left;font:12px/1.7 ui-monospace,monospace;min-width:100%; }

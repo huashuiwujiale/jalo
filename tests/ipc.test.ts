@@ -29,6 +29,9 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await assert.rejects(handlers.get('app:snapshot')!({sender:{},senderFrame:{}}),/无效的调用来源/);
     const project=await invoke('project:add');await invoke('settings:save',{...defaults,model:'mock'});
     const page=await invoke('files:preview',{projectId:project.id,path:'a.txt'});
+    assert.equal((await invoke('files:list',{projectId:project.id,path:'.'})).entries[0].name,'a.txt');
+    await assert.rejects(invoke('files:list',{projectId:project.id,path:'../'}));
+    await assert.rejects(invoke('files:list',{projectId:project.id,path:'.',unexpected:true}));
     const ref={projectId:project.id,path:'a.txt',startLine:1,endLine:1,version:page.version};
     await assert.rejects(invoke('task:submit',{projectId:project.id,prompt:'x',references:[{...ref,projectId:randomUUID()}]}),/其他项目/);
     const taskId=await invoke('task:submit',{projectId:project.id,prompt:'先计划',mode:'plan',references:[ref]});
