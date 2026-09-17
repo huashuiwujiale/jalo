@@ -1,0 +1,22 @@
+node_modules/
+.DS_Store
+dist/
+*.log
+coverage/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Local Jalo data and recovery artifacts
+*.sqlite
+*.sqlite-*
+backups/
+recovery/
+
+# Tooling caches and temporary files
+.vite/
+.cache/
+*.tmp
+*.swp

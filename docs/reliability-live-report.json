@@ -1,0 +1,89 @@
+{
+  "model": "qwen/qwen3-1.7b",
+  "contextLength": 16384,
+  "at": "2026-09-16T06:08:41.526Z",
+  "cases": [
+    {
+      "test": "text",
+      "passed": true,
+      "changed": true,
+      "done": {
+        "type": "done",
+        "status": "completed",
+        "evidence": {
+          "successfulTools": [
+            "read_file",
+            "edit_file"
+          ],
+          "changedFiles": [
+            "sample.txt"
+          ]
+        }
+      },
+      "checks": [
+        {
+          "type": "check",
+          "check": {
+            "path": "sample.txt",
+            "status": "skipped",
+            "parser": "txt",
+            "message": "未进行语法检查：暂不支持该语言",
+            "at": 1789539024484,
+            "version": "03e2418ad2dbeab27cb27a1a9fb2d728d4aca5296b9041ba0d499654b0127a29"
+          }
+        }
+      ]
+    },
+    {
+      "test": "vue",
+      "passed": false,
+      "changed": false,
+      "done": {
+        "type": "done",
+        "status": "failed",
+        "error": "已停止无效重试：index.vue 连续 3 次编辑定位或语法检查失败。失败调用均未写入文件。请检查目标行范围，补充要求或切换模型后继续。",
+        "evidence": {
+          "successfulTools": [
+            "read_file"
+          ],
+          "changedFiles": []
+        }
+      },
+      "checks": [
+        {
+          "type": "check",
+          "check": {
+            "path": "index.vue",
+            "status": "failed",
+            "parser": "Vue 2 / SFC、模板与脚本解析",
+            "message": "Duplicate attribute.",
+            "at": 1789539071622,
+            "version": "d5de739bd277dc0409980a53662b16d166d1ec9d0ff6a368af9f38864d9f9c4b"
+          }
+        },
+        {
+          "type": "check",
+          "check": {
+            "path": "index.vue",
+            "status": "failed",
+            "parser": "Vue 2 / SFC、模板与脚本解析",
+            "message": "Duplicate attribute.",
+            "at": 1789539103867,
+            "version": "d5de739bd277dc0409980a53662b16d166d1ec9d0ff6a368af9f38864d9f9c4b"
+          }
+        },
+        {
+          "type": "check",
+          "check": {
+            "path": "index.vue",
+            "status": "failed",
+            "parser": "Vue 2 / SFC、模板与脚本解析",
+            "message": "Element is missing end tag.",
+            "at": 1789539113099,
+            "version": "287f8da37765b396c5a0e4f44345d9bd329b33bc147475c1387e3d75c03954eb"
+          }
+        }
+      ]
+    }
+  ]
+}
