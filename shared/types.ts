@@ -29,7 +29,7 @@ export interface SubmitInput { projectId: string; prompt: string; taskId?: strin
 export interface RollbackPreview { token: string; patch: string; path: string; createsRecoveryCopy: boolean }
 export interface Change { path: string; before: string | null; after: string; patch: string }
 export interface Approval { id: string; command: string; cwd: string; timeout: number }
-export interface Event { id: string; at: number; kind: 'message' | 'tool' | 'output' | 'notice' | 'error'; text: string; role?: string; runId?: string }
+export interface Event { id: string; at: number; kind: 'message' | 'tool' | 'output' | 'notice' | 'error'; text: string; role?: string; runId?: string; toolCallId?: string; toolPhase?: 'call' | 'result' | 'error' }
 export interface RunEvidence { successfulTools: string[]; changedFiles: string[] }
 export interface Task {
   id: string; projectId: string; title: string; model: string; status: Status; createdAt: number; queuedAt?: number;

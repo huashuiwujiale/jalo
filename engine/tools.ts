@@ -6,12 +6,16 @@ import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { createTwoFilesPatch } from 'diff';
 import { checkSyntax, version } from './syntax';
+import { findVueElements } from './vue-elements';
 import type { Approval, Change, EngineEvent, RunEvidence, Mode, RunChange } from '../shared/types';
 import type { ToolDefinition } from './provider';
 
 const str = z.string().max(48000);
 const relative = z.string().min(1).max(1024);
+const vueSelector = z.object({ tag: z.string().min(1).max(100), attributes: z.record(z.string().max(200), z.string().max(2000)).optional(), text: z.string().max(1000).optional() }).strict();
 const specs = {
+  find_vue_elements: { description: '读取并定位 Vue template 中的完整元素。按 tag、attributes 中的属性原名和字面值精确匹配，例如 {tag:"el-button",attributes:{"@click":"handleAdd"}}。text 可精确匹配直接文本（去除首尾空白）。返回完整原文、行号和版本；多个匹配时收窄条件，不猜行号。', schema: z.object({ path: relative, selector: vueSelector }).strict() },
+  edit_vue_element: { description: '替换唯一匹配的完整 Vue 元素。必须先 find_vue_elements 用相同 selector 得到唯一且完整显示的结果，expectedVersion 使用返回版本。newText 为空表示删除；保留周围元素。多个匹配、过期版本或语法错误均不写入。', schema: z.object({ path: relative, selector: vueSelector, expectedVersion: z.string().length(64), newText: str }).strict() },
   list_directory: { description: '列出项目内目录；最多 200 项。', schema: z.object({ path: relative.default('.') }).strict() },
   search_files: { description: '按文件名或文本字面量搜索项目，忽略依赖目录及符号链接。', schema: z.object({ query: z.string().min(1).max(200), mode: z.enum(['name', 'content']), path: relative.default('.') }).strict() },
   read_file: { description: '读取 UTF-8 文本并建立修改前的版本检查。大文件可分页读取。', schema: z.object({ path: relative, startLine: z.number().int().min(1).default(1), lines: z.number().int().min(1).max(400).default(200) }).strict() },
@@ -24,7 +28,7 @@ const specs = {
 export const definitions: ToolDefinition[] = Object.entries(specs).map(([name, spec]) => ({
   type: 'function', function: { name, description: spec.description, parameters: zodToJsonSchema(spec.schema, { $refStrategy: 'none' }) as Record<string, unknown> },
 }));
-const mutations = new Set(['write_file', 'edit_file', 'replace_lines', 'run_command']);
+const mutations = new Set(['write_file', 'edit_file', 'replace_lines', 'edit_vue_element', 'run_command']);
 export const toolsForMode = (mode: Mode = 'execute') => definitions.filter(t => mode === 'execute' || !mutations.has(t.function.name));
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
 const ignored = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.venv', 'coverage']);
@@ -44,6 +48,7 @@ export class ToolRegistry {
   mode() { return this.options.mode || 'execute'; }
   toolDefinitions() { return toolsForMode(this.mode()); }
   private seen = new Map<string, string>();
+  private vueTargets = new Map<string, { version: string; selector: string; start: number; end: number }>();
   private readRanges = new Map<string, { start: number; end: number }>();
   private instructions = new Map<string, string>();
   private changes = new Map<string, Change>();
@@ -122,11 +127,34 @@ export class ToolRegistry {
     if (!spec) throw new Error(`未知工具：${name}`);
     const args: any = spec.schema.parse(raw);
     const instructions = await this.projectInstructions(args.path || args.cwd || '.');
-    if (instructions && ['write_file', 'edit_file', 'replace_lines', 'run_command'].includes(name)) {
+    if (instructions && mutations.has(name)) {
       return `尚未执行操作。请先遵守以下新发现的项目指令，然后重新调用工具：\n${instructions}`;
     }
     let result: string;
-    if (name === 'list_directory') {
+    if (name === 'find_vue_elements' || name === 'edit_vue_element') {
+      if (!args.path.endsWith('.vue')) throw new Error('结构化元素工具仅支持 .vue 文件');
+      const full = await this.resolve(args.path), source = await this.read(full), currentVersion = hash(source);
+      const selectorKey = JSON.stringify([args.selector.tag, Object.entries(args.selector.attributes || {}).sort(([a], [b]) => a.localeCompare(b)), args.selector.text ?? null]);
+      if (name === 'find_vue_elements') this.vueTargets.delete(full);
+      const matches = findVueElements(source, args.selector);
+      if (name === 'find_vue_elements') {
+        const visible = matches.slice(0, 20).map(m => ({ startLine: m.startLine, endLine: m.endLine, source: m.source.slice(0, 1000), truncated: m.source.length > 1000 }));
+        if (matches.length === 1 && matches[0].source.length <= 20000) {
+          visible[0] = { startLine: matches[0].startLine, endLine: matches[0].endLine, source: matches[0].source, truncated: false };
+          this.seen.set(full, currentVersion);
+          this.vueTargets.set(full, { version: currentVersion, selector: selectorKey, start: matches[0].start, end: matches[0].end });
+        }
+        result = JSON.stringify({ version: currentVersion, count: matches.length, candidates: visible, editable: this.vueTargets.has(full), message: matches.length === 1 ? '仅完整显示的唯一元素可以编辑；newText 为空可删除。' : '请按候选原文补充属性或 text，重新查找直至唯一匹配。' });
+      } else {
+        const target = this.vueTargets.get(full);
+        if (!target || target.version !== currentVersion || args.expectedVersion !== currentVersion || target.selector !== selectorKey) throw new Error('定位记录失效或文件已更改，请用相同条件重新 find_vue_elements，得到唯一完整元素后再编辑');
+        if (matches.length !== 1 || matches[0].start !== target.start || matches[0].end !== target.end) throw new EditMatchError(args.path, '元素不是唯一匹配，请收窄条件重新查找');
+        const content = source.slice(0, target.start) + args.newText + source.slice(target.end);
+        // Reuse all existing version, syntax, backup, checkpoint and write verification gates.
+        result = await this.write(args.path, { content }, false);
+        this.vueTargets.delete(full);
+      }
+    } else if (name === 'list_directory') {
       const entries = await fs.readdir(await this.resolve(args.path), { withFileTypes: true });
       result = entries.filter(e => !ignored.has(e.name)).slice(0, 200).map(e => `${e.isDirectory() ? '[目录]' : e.isSymbolicLink() ? '[链接，不访问]' : '[文件]'} ${e.name}`).join('\n');
       if (entries.length > 200) result += '\n结果已截断';
