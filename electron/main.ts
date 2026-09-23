@@ -117,9 +117,28 @@ function registerApi() {
     const result = await dialog.showOpenDialog(win!, { title: '选择项目文件夹', properties: ['openDirectory'] });
     if (result.canceled || !result.filePaths[0]) return null;
     const root = await fs.realpath(result.filePaths[0]);
-    const existing = store.projects().find(p => p.path === root); if (existing) return existing;
+    const existing = store.projects(true).find(p => p.path === root);
+    if (existing) { if (existing.removedAt) { delete existing.removedAt; store.putProject(existing); broadcast(); } return existing; }
     const project = { id: randomUUID(), name: path.basename(root), path: root };
     store.putProject(project); broadcast(); return project;
+  });
+  register('project:remove', (raw: unknown) => {
+    const id = uuid.parse(raw), project = store.projects().find(p => p.id === id);
+    if (!project) throw new Error('项目不存在或已移除');
+    if (projectLocks.has(id) || tasks.some(t => t.projectId === id && busyStatuses.includes(t.status))) throw new Error('项目存在运行中、等待确认或排队任务，请先停止任务再移除');
+    store.putProject({ ...project, removedAt: Date.now() }); broadcast();
+  });
+  register('task:rename', (raw: unknown) => {
+    const input = z.object({ taskId: uuid, title: z.string().trim().min(1).max(100) }).strict().parse(raw);
+    const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
+    task.title = input.title; store.putTask(task); broadcast();
+  });
+  register('task:archive', (raw: unknown) => {
+    const input = z.object({ taskId: uuid, archived: z.boolean() }).strict().parse(raw);
+    const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
+    if (projectLocks.has(task.projectId) || busyStatuses.includes(task.status)) throw new Error('请先停止或完成任务，再归档或恢复');
+    if (input.archived) task.archivedAt ??= Date.now(); else delete task.archivedAt;
+    store.putTask(task); broadcast();
   });
   register('settings:save', (raw: unknown) => {
     idleRequired(); const value = settingsSchema.parse(raw);
@@ -191,6 +210,7 @@ function registerApi() {
     await fs.access(project.path);
     let task = input.taskId ? tasks.find(t => t.id === input.taskId) : undefined;
     if (input.taskId && !task) throw new Error('任务不存在');
+    if (task?.archivedAt) throw new Error('请先恢复已归档任务，再继续对话');
     if (task && (busyStatuses.includes(task.status) || task.projectId !== input.projectId)) throw new Error('该任务尚未结束或不属于当前项目');
     const references = await captureReferences(project, input.references);
     const plan = input.planRunId ? task?.runs?.find(r => r.id === input.planRunId && r.mode === 'plan' && r.status === 'completed') : undefined;

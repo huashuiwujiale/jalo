@@ -37,6 +37,13 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const taskId=await invoke('task:submit',{projectId:project.id,prompt:'先计划',mode:'plan',references:[ref]});
     const snapshot=()=>invoke('app:snapshot');
     let task=(await snapshot()).tasks.find((t:any)=>t.id===taskId), run=task.runs[0];assert.equal(run.mode,'plan');assert.equal(run.references[0].content,'old');
+    await assert.rejects(invoke('task:archive',{taskId,archived:true}),/停止或完成/);
+    await assert.rejects(invoke('project:remove',project.id),/先停止任务/);
+    await assert.rejects(invoke('task:rename',{taskId,title:'   '}));
+    await assert.rejects(invoke('task:rename',{taskId,title:'x'.repeat(101)}));
+    await assert.rejects(invoke('task:rename',{taskId:randomUUID(),title:'不存在'}),/不存在/);
+    await invoke('task:rename',{taskId,title:'  新的任务名称  '});
+    assert.equal((await snapshot()).tasks[0].title,'新的任务名称');
     const worker=workers.at(-1);worker.emit('message',{type:'done',runId:'other-run',status:'completed'});assert.equal((await snapshot()).tasks[0].status,'running');
     worker.emit('message',{type:'progress',runId:'other-run',progress:{phase:'generating',since:1}});
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'preparing');
@@ -49,6 +56,10 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'message',role:'assistant',text:'读取 a.txt，再将 old 改为 new，重新读取验收。'}});
     worker.emit('message',{type:'done',runId:run.id,status:'completed',evidence:{successfulTools:['read_file'],changedFiles:[]}});
     assert.ok((await snapshot()).tasks[0].runs[0].progress.endedAt);
+    await invoke('task:archive',{taskId,archived:true});
+    const archived=(await snapshot()).tasks[0];assert.ok(archived.archivedAt);assert.equal(archived.runs[0].status,'completed');
+    await assert.rejects(invoke('task:submit',{projectId:project.id,taskId,prompt:'不应执行'}),/先恢复/);
+    await invoke('task:archive',{taskId,archived:false});assert.equal((await snapshot()).tasks[0].archivedAt,undefined);
     await invoke('task:submit',{projectId:project.id,taskId,prompt:'执行计划',mode:'execute',planRunId:run.id});
     task=(await snapshot()).tasks[0];const second=task.runs.at(-1);assert.notEqual(second.id,run.id);assert.equal(second.planRunId,run.id);
     const w=workers.at(-1), change={id:randomUUID(),runId:second.id,path:'a.txt',before:'old',after:'new',beforeVersion:version('old'),afterVersion:version('new'),check:checkSyntax('a.txt','new'),state:'prepared',patch:'-old\n+new'};
@@ -64,5 +75,14 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal(await fs.readFile(path.join(root,'a.txt'),'utf8'),'old');task=(await snapshot()).tasks[0];assert.equal(task.runs.at(-1).changes[0].state,'reverted');assert.equal(task.changes.length,0);assert.ok(task.messages.at(-1).content.includes('重新读取'));
     await assert.rejects(invoke('task:submit',{projectId:project.id,taskId,prompt:'review',mode:'review'}),/选择已有核验记录/);
     await invoke('task:submit',{projectId:project.id,taskId,prompt:'review',mode:'review',reviewRunId:second.id});assert.equal((await snapshot()).tasks[0].runs.at(-1).reviewRunId,second.id);
+    const lastRun=(await snapshot()).tasks[0].currentRunId;
+    workers.at(-1).emit('message',{type:'done',runId:lastRun,status:'completed'});
+    const beforeRemoval=(await snapshot()).tasks;
+    await invoke('project:remove',project.id);
+    assert.equal((await snapshot()).projects.length,0);assert.deepEqual((await snapshot()).tasks,beforeRemoval);
+    assert.equal(await fs.readFile(path.join(root,'a.txt'),'utf8'),'old');
+    await assert.rejects(invoke('task:submit',{projectId:project.id,prompt:'已移除项目'}),/项目/);
+    const restored=await invoke('project:add');assert.equal(restored.id,project.id);assert.equal(restored.removedAt,undefined);
+    assert.deepEqual((await snapshot()).tasks,beforeRemoval);assert.equal((await snapshot()).projects.length,1);
   } finally { Module._load=original;app.emit('before-quit');await fs.rm(home,{recursive:true,force:true}); }
 });

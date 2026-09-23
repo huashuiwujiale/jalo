@@ -12,7 +12,7 @@ export interface LocalModel {
   key: string; name: string; size: number; maxContext: number;
   toolUse?: boolean; instances: { id: string; contextLength: number }[];
 }
-export interface Project { id: string; name: string; path: string }
+export interface Project { id: string; name: string; path: string; removedAt?: number }
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string } }
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null;
@@ -33,6 +33,7 @@ export interface Approval { id: string; command: string; cwd: string; timeout: n
 export interface Event { id: string; at: number; kind: 'message' | 'tool' | 'output' | 'notice' | 'error'; text: string; role?: string; runId?: string; toolCallId?: string; toolPhase?: 'call' | 'result' | 'error' }
 export interface RunEvidence { successfulTools: string[]; changedFiles: string[] }
 export interface Task {
+  archivedAt?: number;
   id: string; projectId: string; title: string; model: string; status: Status; createdAt: number; queuedAt?: number;
   messages: Message[]; events: Event[]; changes: Change[]; approval?: Approval; error?: string; lastRun?: RunEvidence; mode?: Mode; runs?: Run[]; currentRunId?: string; legacy?: boolean;
 }
@@ -52,6 +53,9 @@ export type EngineEvent = (
 export interface Api {
   snapshot(): Promise<Snapshot>;
   addProject(): Promise<Project | null>;
+  removeProject(projectId: string): Promise<void>;
+  renameTask(taskId: string, title: string): Promise<void>;
+  archiveTask(taskId: string, archived: boolean): Promise<void>;
   saveSettings(settings: Settings): Promise<void>;
   models(): Promise<LocalModel[]>;
   loadModel(key: string): Promise<void>;

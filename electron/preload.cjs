@@ -7,6 +7,9 @@ const subscribe = (channel, fn) => {
 contextBridge.exposeInMainWorld('localCode', Object.freeze({
   snapshot: () => ipcRenderer.invoke('app:snapshot'),
   addProject: () => ipcRenderer.invoke('project:add'),
+  removeProject: projectId => ipcRenderer.invoke('project:remove', projectId),
+  renameTask: (taskId, title) => ipcRenderer.invoke('task:rename', { taskId, title }),
+  archiveTask: (taskId, archived) => ipcRenderer.invoke('task:archive', { taskId, archived }),
   saveSettings: settings => ipcRenderer.invoke('settings:save', settings),
   models: () => ipcRenderer.invoke('models:list'),
   loadModel: key => ipcRenderer.invoke('models:load', key),

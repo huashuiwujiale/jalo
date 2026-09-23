@@ -31,7 +31,7 @@ export class Store {
     return result;
   }
   private put(table: string, id: string, value: unknown) { this.db.run(`INSERT OR REPLACE INTO ${table} (id,data) VALUES (?,?)`, [id, JSON.stringify(value)]); this.flush(); }
-  projects() { return this.all<Project>('projects'); }
+  projects(includeRemoved = false) { return this.all<Project>('projects').filter(p => includeRemoved || !p.removedAt); }
   tasks() { return this.all<Task>('tasks').sort((a, b) => b.createdAt - a.createdAt); }
   settings(): Settings { return { ...defaults, ...this.all<Settings>('settings')[0] }; }
   putProject(project: Project) { this.put('projects', project.id, project); }

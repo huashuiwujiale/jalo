@@ -69,6 +69,15 @@ JALO_MODEL=qwen/qwen3-1.7b node --import tsx scripts/reliability-live.ts
 
 ## 数据与权限
 
+### 项目与任务管理
+
+- 左侧任务记录支持重命名，按标题或用户要求搜索；搜索范围是当前项目、当前或已归档分类。
+- 点击任务旁的归档按钮可收起已结束的任务；在“已归档”中仍可查看记录，恢复后可继续对话。运行中、等待确认或排队的任务需先停止或结束。
+- 点击项目旁的移除按钮并确认后，只隐藏项目入口，不删除代码、任务记录或备份。重新添加同一目录可恢复原项目及历史任务；项目有未结束任务时禁止移除。
+- 以上状态保存在本地数据库中，重启后保留。归档及移除不是磁盘空间清理。
+
+### 存储位置与保护
+
 - SQLite 数据库位于 Electron `userData` 目录下的 `local-code.sqlite`，新安装使用 `~/Library/Application Support/Jalo/`。已有 Local Code 版本的数据会继续使用原来的 `~/Library/Application Support/Local Code/`，同时保留原系统加密身份，以兼容任务记录和令牌。
 - 原文备份位于同目录的 `backups/<task-id>/<文件路径哈希>.json`，保存相对路径及首次修改前内容；新建文件的原文为 `null`。0.2 新轮次可在右侧预览反向差异后逐文件安全回退；历史未核验记录不开放回退。
 - 访问令牌用 Electron `safeStorage` 加密后入库；不可用时拒绝保存令牌。
