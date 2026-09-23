@@ -30,8 +30,10 @@ port.on('message', async ({ data }: any) => {
   const settings: Settings = { ...data.settings };
   try {
     if (!run) throw new Error('缺少本轮执行记录，禁止执行');
+    emit({ type: 'progress', progress: { phase: 'preparing', since: Date.now() } });
     await captureReferences({ id: task.projectId, name: '', path: root }, run.references);
     const provider = new LMStudioProvider(settings);
+    emit({ type: 'progress', progress: { phase: 'connecting', since: Date.now() } });
     const models = await provider.list(controller.signal);
     const model = models.find(m => m.key === task.model || m.instances.some(i => i.id === task.model));
     if (!model) throw new Error('选择的模型不存在，请刷新模型列表');
@@ -41,7 +43,10 @@ port.on('message', async ({ data }: any) => {
     if (instance) {
       settings.model = instance.id;
       settings.contextLength = Math.min(settings.contextLength, instance.contextLength);
-    } else settings.model = await provider.load(model.key, settings.contextLength, controller.signal);
+    } else {
+      emit({ type: 'progress', progress: { phase: 'loading', since: Date.now() } });
+      settings.model = await provider.load(model.key, settings.contextLength, controller.signal);
+    }
     if (settings.maxTokens >= settings.contextLength / 2) throw new Error('已加载模型的上下文过小，请卸载后使用更大上下文重新加载，或降低最大输出');
     const registry = new ToolRegistry({ root, backupDir, signal: controller.signal, timeout: settings.commandTimeout, emit, approve, changes: task.changes, mode: run.mode, runId, reviewChanges: run.mode === 'review' ? task.runs?.find(r => r.id === run.reviewRunId)?.changes.filter(c => c.state === 'written') || [] : undefined, checkpoint: change => new Promise<void>((resolve, reject) => { checkpoints.set(change.id, { resolve, reject }); emit({ type: 'checkpoint', checkpoint: change }); }) });
     // A linked execution/review starts with fresh file evidence, while retaining history in storage.

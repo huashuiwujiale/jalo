@@ -7,6 +7,8 @@ import { busyStatuses, defaults } from '../shared/types';
 import './style.css';
 import { groupToolEvents } from './tool-events';
 import { ToolCard } from './tool-card';
+import { TaskProgress, RecoveryPanel } from './task-progress';
+import { recoveryPrompt } from '../shared/progress';
 declare global { interface Window { localCode: Api } }
 const statusText: Record<Task['status'], string> = { queued: '排队中', running: '执行中', waiting: '等待确认', completed: '本轮结束', failed: '执行失败', cancelled: '已停止', interrupted: '已中断' };
 const api = window.localCode;
@@ -128,7 +130,13 @@ function App() {
           </div><div className="welcome-foot"><ShieldCheck size={14}/>项目内自动编辑 · 终端命令逐次确认</div></section> : <div className="timeline"><div className="task-heading"><span className={`status-tag ${task.status}`}>{statusText[task.status]}</span><span>{new Date(task.createdAt).toLocaleString('zh-CN')}</span></div>
           {groupToolEvents(task.events).map(e => e.kind === 'tool-group' ? <ToolCard key={e.id} group={e} active={busyStatuses.includes(task.status) && (!e.call.runId || e.call.runId === task.currentRunId)} waiting={task.status === 'waiting'}/> : e.kind === 'message' ? <article key={e.id} className={`message ${e.role}`}><div className="message-author">{e.role === 'user' ? <span className="avatar user-avatar">你</span> : <span className="avatar assistant-avatar"><Code2 size={15}/></span>}<strong>{e.role === 'user' ? '你' : 'Jalo'}</strong></div><div className="message-text">{e.text}</div></article> : e.kind === 'output' ? null : e.kind === 'notice' ? <div key={e.id} className="progress-line"><span/>{e.text}</div> : <details key={e.id} className={`tool-event ${e.kind}`}><summary><Terminal size={13}/><span>{e.text.split('\n')[0].slice(0, 150)}</span><ChevronDown size={12}/></summary><pre>{e.text}</pre></details>)}
           {streams[taskId] && <article className="message assistant"><div className="message-author"><span className="avatar assistant-avatar"><Code2 size={15}/></span><strong>Jalo</strong><LoaderCircle className="spin" size={13}/></div><div className="message-text">{streams[taskId]}<span className="cursor"/></div></article>}
-          {task.error && <div className="task-error"><strong>{statusText[task.status]}</strong><p>{task.error}</p></div>}
+          <RecoveryPanel task={task} disabled={sending || isBusy} resume={() => {
+            const latest = task.runs?.find(r => r.id === task.currentRunId) || task.runs?.at(-1);
+            setMode(latest?.mode || task.mode || 'execute');
+            setRunId(latest?.reviewRunId || latest?.id || '');
+            setPrompt(old => old.trim() ? old : recoveryPrompt(task));
+            document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus();
+          }} inspect={() => { setTab('changes'); setRunId(task.currentRunId || ''); }} settings={() => setSettingsOpen(true)}/>
           {task.legacy && <p className="inspector-note">历史数据，缺少轮次核验。</p>}
           {run && !busyStatuses.includes(run.status) && <><RunResult run={run}/>{run.mode === 'plan' && run.status === 'completed' && <button className="primary" disabled={sending || projectBusy} onClick={() => submit(run.id)}>按计划执行</button>}</>}
 
@@ -137,6 +145,7 @@ function App() {
         {task && showLatest && <div className="latest-row"><button className="latest-button" onClick={scrollToLatest}><ChevronDown size={14}/>回到最新</button></div>}
       </div>
       <div className="composer-area">
+        {task && <TaskProgress task={task}/>}
         {task?.approval && <div className="approval"><div><ShieldCheck size={17}/><strong>需要确认终端命令</strong><span>{task.approval.timeout}s 超时</span></div><pre>{task.approval.command}</pre><small>工作目录：{task.approval.cwd}<br/>命令以你的系统用户权限运行。</small><footer><button onClick={() => api.approve(task.id, task.approval!.id, false).catch(fail)}>拒绝</button><button className="primary" onClick={() => api.approve(task.id, task.approval!.id, true).catch(fail)}>允许执行<ArrowRight size={14}/></button></footer></div>}
         <div className="mode-controls"><label>任务模式 <select aria-label="任务模式" value={mode} disabled={sending || isBusy} onChange={e => setMode(e.target.value as Mode)}>{Object.entries(modeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button disabled={!project || isBusy || references.length >= 8} onClick={() => setPicker({})}>@ 引用文件</button><small>{mode === 'execute' ? '项目内自动写入，支持安全回退' : mode === 'plan' ? '只读分析，确认计划后执行' : '只审查右侧选定轮次，禁止自动修复'}</small></div>
         {!!references.length && <div className="reference-chips">{references.map((r, i) => <span className={r.projectId !== projectId ? 'invalid' : ''} key={i} title={state.projects.find(p => p.id === r.projectId)?.path}><button disabled={r.projectId !== projectId} onClick={() => setPicker({ path: r.path })}>{r.path}:{r.startLine}–{r.endLine}{r.projectId !== projectId ? '（项目已切换，引用失效）' : ''}</button><button aria-label="移除引用" onClick={() => setReferences(references.filter((_, j) => j !== i))}>×</button></span>)}</div>}

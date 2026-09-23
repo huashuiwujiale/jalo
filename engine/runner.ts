@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { EngineEvent, Message, Settings, Task } from '../shared/types';
+import type { EngineEvent, Message, Settings, Task, Progress } from '../shared/types';
 import type { Completion, ModelProvider, ToolDefinition } from './provider';
 import { definitions, EditMatchError, ToolRegistry } from './tools';
 import { compactContext } from './context';
@@ -21,6 +21,7 @@ const probe: ToolDefinition = { type: 'function', function: { name: 'capability_
 export class TaskRunner {
   constructor(private provider: ModelProvider, private tools: ToolRegistry, private settings: Settings, private emit: (event: EngineEvent) => void, private signal: AbortSignal) {}
   private notice(text: string) { this.emit({ type: 'event', event: { id: randomUUID(), at: Date.now(), kind: 'notice', text } }); }
+  private progress(phase: Progress['phase'], step?: number, tool?: string) { this.emit({ type: 'progress', progress: { phase, since: Date.now(), step, maxSteps: this.settings.maxSteps, tool } }); }
   async run(task: Pick<Task, 'messages'>, checkCapability = true) {
     let messages: Message[] = [];
     const definitions = this.tools.toolDefinitions();
@@ -29,10 +30,12 @@ export class TaskRunner {
     let emptyRetries = 0;
     let evidenceRetries = 0;
     try {
+      this.progress('preparing');
       await this.tools.init();
       const instructions = await this.tools.projectInstructions();
       messages = [{ role: 'system', content: systemPrompt + '\n' + modePrompt + '\n\n' + instructions }, ...task.messages.filter(m => m.role !== 'system')];
       if (checkCapability) {
+        this.progress('probing');
         this.notice('正在验证模型的结构化工具调用能力…');
         const response = await this.provider.generate([{ role: 'user', content: '调用 capability_check 工具，参数为 {"ok":true}。不要输出其他内容。' }], [probe], this.signal, () => {}, 'capability_check');
         const call = response.message.tool_calls?.[0];
@@ -41,6 +44,7 @@ export class TaskRunner {
         if (!valid) throw new Error('该模型未通过结构化工具调用检测。请选择支持工具调用的模型，并检查 LM Studio 聊天模板。');
       }
       for (let step = 0; step < this.settings.maxSteps; step++) {
+        this.progress('preparing', step + 1);
         this.signal.throwIfAborted();
         const context = compactContext(messages, definitions, this.settings.contextLength, this.settings.maxTokens);
         messages = context.messages;
@@ -49,7 +53,10 @@ export class TaskRunner {
         let completion: Completion;
         for (;;) {
           this.signal.throwIfAborted();
-          completion = await this.provider.generate(messages, definitions, this.signal, text => this.emit({ type: 'delta', text }));
+          this.progress('waiting_model', step + 1);
+          let generating = false;
+          const activity = () => { if (!generating) { generating = true; this.progress('generating', step + 1); } };
+          completion = await this.provider.generate(messages, definitions, this.signal, text => { activity(); this.emit({ type: 'delta', text }); }, undefined, activity);
           this.signal.throwIfAborted();
           if (completion.finishReason === 'length') throw new Error('模型输出达到上限，本轮工具未执行。请增大最大输出或缩小任务后继续。');
           if (!['stop', 'tool_calls'].includes(completion.finishReason)) throw new Error(`模型未正常完成本轮响应：${completion.finishReason}`);
@@ -96,6 +103,7 @@ export class TaskRunner {
             continue;
           }
           const label = `${call.function.name} ${call.function.arguments.slice(0, 12000)}${call.function.arguments.length > 12000 ? '\n参数展示已截断' : ''}`;
+          this.progress('tool', step + 1, call.function.name);
           this.emit({ type: 'event', event: { id: randomUUID(), at: Date.now(), kind: 'tool', toolCallId: call.id, toolPhase: 'call', text: label } });
           let result: string;
           try {

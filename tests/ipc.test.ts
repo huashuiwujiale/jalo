@@ -38,8 +38,17 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const snapshot=()=>invoke('app:snapshot');
     let task=(await snapshot()).tasks.find((t:any)=>t.id===taskId), run=task.runs[0];assert.equal(run.mode,'plan');assert.equal(run.references[0].content,'old');
     const worker=workers.at(-1);worker.emit('message',{type:'done',runId:'other-run',status:'completed'});assert.equal((await snapshot()).tasks[0].status,'running');
+    worker.emit('message',{type:'progress',runId:'other-run',progress:{phase:'generating',since:1}});
+    assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'preparing');
+    worker.emit('message',{type:'progress',runId:run.id,progress:{phase:'waiting_model',since:Date.now(),step:1,maxSteps:30}});
+    assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'waiting_model');
+    worker.emit('message',{type:'approval',runId:run.id,approval:{id:randomUUID(),command:'node --version',cwd:root,timeout:1}});
+    assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'approval');
+    worker.emit('message',{type:'approval-resolved',runId:run.id});
+    assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'tool');
     worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'message',role:'assistant',text:'读取 a.txt，再将 old 改为 new，重新读取验收。'}});
     worker.emit('message',{type:'done',runId:run.id,status:'completed',evidence:{successfulTools:['read_file'],changedFiles:[]}});
+    assert.ok((await snapshot()).tasks[0].runs[0].progress.endedAt);
     await invoke('task:submit',{projectId:project.id,taskId,prompt:'执行计划',mode:'execute',planRunId:run.id});
     task=(await snapshot()).tasks[0];const second=task.runs.at(-1);assert.notEqual(second.id,run.id);assert.equal(second.planRunId,run.id);
     const w=workers.at(-1), change={id:randomUUID(),runId:second.id,path:'a.txt',before:'old',after:'new',beforeVersion:version('old'),afterVersion:version('new'),check:checkSyntax('a.txt','new'),state:'prepared',patch:'-old\n+new'};

@@ -30,6 +30,16 @@ const probe = () => call('capability_check', { ok: true });
 const stop = (): Completion => ({ message: { role: 'assistant', content: '已完成' }, finishReason: 'stop' });
 const empty = (): Completion => ({ message: { role: 'assistant', content: '\n\n' }, finishReason: 'stop' });
 const textReply = (content: string): Completion => ({ message: { role: 'assistant', content }, finishReason: 'stop' });
+test('runner reports real request and tool boundaries, including a new wait after a completed tool', async () => {
+  const x = await run([probe(), call('write_file', { path: 'a.txt', content: 'hello' }), textReply('已写入 a.txt')]);
+  try {
+    const progress = x.events.filter((e): e is Extract<EngineEvent, { type: 'progress' }> => e.type === 'progress');
+    assert.deepEqual(progress.map(e => e.progress.phase), ['preparing','probing','preparing','waiting_model','tool','preparing','waiting_model']);
+    const tool = progress.find(e => e.progress.phase === 'tool')!.progress;
+    assert.equal(tool.step,1);assert.equal(tool.tool,'write_file');assert.equal(tool.maxSteps,10);
+    assert.equal((x.events.at(-1) as any).status,'completed');
+  } finally { await x.cleanup(); }
+});
 test('fabricated tool transcripts fail verification and never edit files or enter model history', async () => {
   const fake = () => textReply('工具: read\\_file tool: 读取 a.txt\n工具: replace\\_lines tool: 替换整行 startLine=1 endLine=2 newText=""\n实际验证：文件内容已更新，新增按钮被移除');
   const x = await run([probe(), fake(), fake(), call('write_file', { path: 'a.txt', content: 'never' })]);

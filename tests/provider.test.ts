@@ -33,6 +33,25 @@ test('capability probe uses the LM Studio compatible required tool choice', asyn
   await p.generate([], [], new AbortController().signal, () => {}, 'capability_check');
   assert.equal(choice, 'required');
 });
+test('generation activity includes reasoning and tool arguments, but not empty keepalive frames', async () => {
+  for (const delta of [{ reasoning_content: '思考' }, { tool_calls: [{ index: 0, id: 'a', function: { name: 'read_file', arguments: '{}' } }] }, { content: '回复' }]) {
+    let activity = 0;
+    const p = new LMStudioProvider(defaults, (async () => fakeStream(frame({}) + frame(delta) + frame({ content: '结束' }, 'stop'))) as typeof fetch);
+    await p.generate([], [], new AbortController().signal, () => {}, undefined, () => activity++);
+    assert.equal(activity, 1);
+  }
+  let activity = 0;
+  const p = new LMStudioProvider(defaults, (async () => fakeStream(frame({}, 'stop'))) as typeof fetch);
+  await p.generate([], [], new AbortController().signal, () => {}, undefined, () => activity++);
+  assert.equal(activity, 0);
+});
+test('stream-body timeouts and cancellation report an actionable failure instead of raw abort errors', async () => {
+  const signal = new AbortController();
+  const p = new LMStudioProvider(defaults, (async () => new Response(new ReadableStream({ start(c) { c.error(new DOMException('raw timeout', 'TimeoutError')); } }))) as typeof fetch);
+  await assert.rejects(p.generate([], [], signal.signal, () => {}), /响应流超时或中断/);
+  signal.abort();
+  await assert.rejects(p.generate([], [], signal.signal, () => {}), /任务已停止/);
+});
 test('v1 model management uses instance IDs and filters embedding models', async () => {
   const requests: { url: string; body?: any }[] = [];
   const p = new LMStudioProvider(defaults, (async (url, options) => {

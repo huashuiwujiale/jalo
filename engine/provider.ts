@@ -5,7 +5,7 @@ export interface ModelProvider {
   list(signal?: AbortSignal): Promise<LocalModel[]>;
   load(key: string, contextLength: number, signal?: AbortSignal): Promise<string>;
   unload(instance: string, signal?: AbortSignal): Promise<void>;
-  generate(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, delta: (text: string) => void, forceTool?: string): Promise<Completion>;
+  generate(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, delta: (text: string) => void, forceTool?: string, activity?: () => void): Promise<Completion>;
 }
 export class LMStudioProvider implements ModelProvider {
   constructor(public settings: Settings, private fetcher: typeof fetch = fetch) {}
@@ -47,7 +47,7 @@ export class LMStudioProvider implements ModelProvider {
     return result.instance_id;
   }
   async unload(instance: string, signal?: AbortSignal) { await this.request('/api/v1/models/unload', { instance_id: instance }, signal); }
-  async generate(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, delta: (text: string) => void, forceTool?: string): Promise<Completion> {
+  async generate(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, delta: (text: string) => void, forceTool?: string, activity?: () => void): Promise<Completion> {
     const response = await this.request('/v1/chat/completions', {
       model: this.settings.model, messages, tools, stream: true,
       temperature: this.settings.temperature, max_tokens: this.settings.maxTokens,
@@ -60,6 +60,7 @@ export class LMStudioProvider implements ModelProvider {
     const decoder = new TextDecoder();
     let buffer = '', content = '', finishReason = '', received = 0, doneMarker = false;
     let reasoningCharacters = 0;
+    let reportedActivity = false;
     const calls = new Map<number, ToolCall>();
     const consume = (event: string) => {
       const payload = event.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trimStart()).join('\n');
@@ -72,6 +73,7 @@ export class LMStudioProvider implements ModelProvider {
       if (!choice) return;
       if (choice.finish_reason) finishReason = choice.finish_reason;
       const d = choice.delta || {};
+      if (!reportedActivity && (d.content || d.reasoning_content || d.reasoning || d.tool_calls?.length)) { reportedActivity = true; activity?.(); }
       // Diagnose reasoning-only responses, never treat reasoning as executable output.
       const reasoning = d.reasoning_content ?? d.reasoning;
       if (typeof reasoning === 'string') reasoningCharacters += reasoning.length;
@@ -104,6 +106,11 @@ export class LMStudioProvider implements ModelProvider {
       if (toolCalls.some(c => !c.id || !c.function.name)) throw new Error('工具调用缺少 ID 或名称');
       if (new Set(toolCalls.map(c => c.id)).size !== toolCalls.length) throw new Error('模型返回重复工具调用 ID');
       return { message: { role: 'assistant', content: content || null, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) }, finishReason, reasoningCharacters };
+    } catch (error) {
+      if (signal.aborted) throw new Error('任务已停止');
+      if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) throw new Error('LM Studio 响应流超时或中断，本轮未完成的工具调用没有执行。请检查服务状态后继续。');
+      if (error instanceof TypeError) throw new Error('LM Studio 响应流连接中断，本轮未完成的工具调用没有执行。请检查服务状态后继续。');
+      throw error;
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   }
 }

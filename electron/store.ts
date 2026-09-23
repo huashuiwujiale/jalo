@@ -17,7 +17,7 @@ export class Store {
     const store = new Store(db, file);
     for (const task of store.tasks()) {
       if (!task.runs?.length) { task.legacy = true; store.putTask(task); }
-      for (const run of task.runs || []) { if (busyStatuses.includes(run.status)) { run.status = 'interrupted'; run.endedAt = Date.now(); } for (const change of run.changes) if (change.state === 'prepared') change.state = 'uncertain'; }
+      for (const run of task.runs || []) { if (busyStatuses.includes(run.status)) { run.status = 'interrupted'; run.endedAt = Date.now(); } if (run.progress && !busyStatuses.includes(run.status)) run.progress.endedAt ??= run.endedAt || Date.now(); for (const change of run.changes) if (change.state === 'prepared') change.state = 'uncertain'; }
       if (busyStatuses.includes(task.status)) {
         task.status = 'interrupted'; task.approval = undefined; task.error = '应用退出时任务未完成。请查看已产生的修改，补充指令后手动继续。';
         store.putTask(task);
