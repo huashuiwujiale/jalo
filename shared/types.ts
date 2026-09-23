@@ -38,6 +38,11 @@ export interface Task {
   messages: Message[]; events: Event[]; changes: Change[]; approval?: Approval; error?: string; lastRun?: RunEvidence; mode?: Mode; runs?: Run[]; currentRunId?: string; legacy?: boolean;
 }
 export interface Snapshot { projects: Project[]; tasks: Task[]; settings: Settings; activeId?: string }
+export interface AppInfo {
+  version: string; packaged: boolean; platform: string; arch: string;
+  electron: string; chrome: string; node: string; osRelease: string;
+  dataDirectory: string; logDirectory: string; logsAvailable: boolean;
+}
 export type EngineEvent = (
   | { type: 'progress'; progress: Progress }
   | { type: 'process'; pid: number; running: boolean }
@@ -51,6 +56,9 @@ export type EngineEvent = (
   | { type: 'approval-resolved' }
   | { type: 'done'; status: Status; error?: string; evidence?: RunEvidence }) & { runId?: string };
 export interface Api {
+  appInfo(): Promise<AppInfo>;
+  openDataDirectory(): Promise<void>;
+  exportDiagnostics(): Promise<string | null>;
   snapshot(): Promise<Snapshot>;
   addProject(): Promise<Project | null>;
   removeProject(projectId: string): Promise<void>;

@@ -10,6 +10,7 @@ import { ToolCard } from './tool-card';
 import { TaskProgress, RecoveryPanel } from './task-progress';
 import { recoveryPrompt } from '../shared/progress';
 import { TaskHistory, RemoveProjectDialog } from './task-history';
+import { AppMaintenance } from './app-maintenance';
 declare global { interface Window { localCode: Api } }
 const statusText: Record<Task['status'], string> = { queued: '排队中', running: '执行中', waiting: '等待确认', completed: '本轮结束', failed: '执行失败', cancelled: '已停止', interrupted: '已中断' };
 const api = window.localCode;
@@ -185,7 +186,7 @@ function SettingsDialog({ state, close, fail }: { state: Snapshot; close: () => 
   useEffect(() => { api.models().then(m => { setModels(m); setConnected(true); }).catch(() => {}); }, []);
   return <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget && !working) close(); }}><section className="settings-modal" role="dialog" aria-modal="true" aria-label="模型与设置"><header><div><span className="settings-icon"><Cpu size={22}/></span><div><h2>模型与设置</h2><p>你的模型，你的工作环境。</p></div></div><button aria-label="关闭设置" disabled={working} onClick={close}><X size={19}/></button></header>
     {locked && <div className="locked-note">任务执行或排队期间，模型与配置已锁定。请先完成或停止任务。</div>}
-    <div className="settings-body"><div className="settings-section-heading"><span>连接 LM Studio</span><small className={connected ? 'connected' : ''}><i className={connected ? 'green-dot' : 'gray-dot'}/>{connected ? '服务可达' : '尚未连接'}</small></div>
+    <div className="settings-body"><AppMaintenance api={api}/><div className="settings-section-heading"><span>连接 LM Studio</span><small className={connected ? 'connected' : ''}><i className={connected ? 'green-dot' : 'gray-dot'}/>{connected ? '服务可达' : '尚未连接'}</small></div>
       <fieldset disabled={locked || working}><label>服务地址<input value={draft.baseUrl} placeholder="http://127.0.0.1:1234" onChange={e => { field('baseUrl', e.target.value); setConnected(false); }}/></label><label>访问令牌 <small>可选，使用系统加密存储</small><input type="password" autoComplete="off" value={draft.token} placeholder="未启用认证时留空" onChange={e => field('token', e.target.value)}/></label><button className="outline connect-button" onClick={() => perform(async () => { await api.saveSettings(draft); const m = await api.models(); setModels(m); setConnected(true); setFeedback(`连接成功，发现 ${m.length} 个语言模型`); })}><RefreshCw size={14} className={working ? 'spin' : ''}/>保存并检测连接</button></fieldset>
       <div className="settings-section-heading"><span>本地模型</span><small>{models.length} 个可用</small></div>
       <fieldset disabled={locked || working}><label>默认模型<select value={draft.model} onChange={e => field('model', e.target.value)}><option value="">选择一个模型</option>{draft.model && !models.some(m => m.key === draft.model) && <option value={draft.model}>{draft.model}</option>}{models.map(m => <option key={m.key} value={m.key}>{m.name}</option>)}</select></label></fieldset>

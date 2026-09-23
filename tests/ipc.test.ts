@@ -13,11 +13,15 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
   const home = await fs.mkdtemp(path.join(os.tmpdir(),'jalo-ipc-'));
   const root=path.join(home,'sample');await fs.mkdir(root);await fs.writeFile(path.join(root,'a.txt'),'old');
   const handlers = new Map<string,Function>(), workers:any[]=[]; let window:any, userData='', fatal:any;
+  let saveSelection: any = { canceled: true }, saveCalls = 0, openError = '', about: any;
+  const opened: string[] = [];
   const app=new EventEmitter() as any;
-  Object.assign(app,{getPath:(key:string)=>key==='userData'?userData:home,setPath:(_k:string,v:string)=>userData=v,setName:()=>{},setAboutPanelOptions:()=>{},requestSingleInstanceLock:()=>true,whenReady:()=>Promise.resolve(),quit:()=>{}});
+  Object.assign(app,{getVersion:()=> '9.8.7',isPackaged:false,getPath:(key:string)=>key==='userData'?userData:home,setPath:(_k:string,v:string)=>userData=v,setName:()=>{},setAboutPanelOptions:(value:any)=>about=value,requestSingleInstanceLock:()=>true,whenReady:()=>Promise.resolve(),quit:()=>{}});
   class Window extends EventEmitter {
     webContents:any; constructor(){super();window=this;this.webContents={mainFrame:{},send:()=>{},setWindowOpenHandler:()=>{},on:()=>{},session:{setPermissionRequestHandler:()=>{}}};} isDestroyed(){return false} async loadURL(){} }
   const fake = {app,BrowserWindow:Window,dialog:{showOpenDialog:async()=>({canceled:false,filePaths:[root]}),showErrorBox:(_t:string,m:string)=>fatal=m},ipcMain:{handle:(n:string,h:Function)=>handlers.set(n,h)},Menu:{setApplicationMenu:()=>{},buildFromTemplate:()=>[]},safeStorage:{isEncryptionAvailable:()=>true},utilityProcess:{fork:()=>{const w=new EventEmitter() as any;w.sent=[];w.postMessage=(m:any)=>w.sent.push(m);w.kill=()=>{};workers.push(w);setImmediate(()=>w.emit('spawn'));return w;}}};
+  Object.assign(fake,{shell:{openPath:async (directory:string)=>{opened.push(directory);return openError;}}});
+  Object.assign(fake.dialog,{showSaveDialog:async()=>{saveCalls++;return saveSelection;}});
   const Module=require('node:module'), original=Module._load;
   Module._load=function(id:string,...args:any[]){if(id==='electron')return fake;return original.call(this,id,...args)};
   process.env.LOCAL_CODE_DEV_URL='http://127.0.0.1:5173';
@@ -27,6 +31,15 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal(fatal,undefined);assert.ok(window);
     const invoke=(name:string,...args:any[])=>handlers.get(name)!({sender:window.webContents,senderFrame:window.webContents.mainFrame},...args);
     await assert.rejects(handlers.get('app:snapshot')!({sender:{},senderFrame:{}}),/无效的调用来源/);
+    await assert.rejects(handlers.get('app:export-diagnostics')!({sender:{},senderFrame:{}}),/无效的调用来源/);
+    assert.equal(saveCalls,0);
+    const info=await invoke('app:info');assert.equal(info.version,'9.8.7');assert.equal(about.applicationVersion,info.version);
+    assert.equal(info.packaged,false);assert.equal(info.dataDirectory,userData);assert.equal(info.logDirectory,path.join(userData,'logs'));
+    await invoke('app:open-data','/unexpected');assert.deepEqual(opened,[userData]);
+    openError='OS refused';await assert.rejects(invoke('app:open-data'),/无法打开/);openError='';
+    assert.equal(await invoke('app:export-diagnostics'),null);
+    saveSelection={canceled:false,filePath:path.join(userData,'local-code.sqlite')};
+    await assert.rejects(invoke('app:export-diagnostics'),/数据目录之外/);
     const project=await invoke('project:add');await invoke('settings:save',{...defaults,model:'mock'});
     const page=await invoke('files:preview',{projectId:project.id,path:'a.txt'});
     assert.equal((await invoke('files:list',{projectId:project.id,path:'.'})).entries[0].name,'a.txt');
@@ -49,6 +62,13 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'preparing');
     worker.emit('message',{type:'progress',runId:run.id,progress:{phase:'waiting_model',since:Date.now(),step:1,maxSteps:30}});
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'waiting_model');
+    saveSelection={canceled:false,filePath:path.join(home,'diagnostics.json')};
+    assert.equal(await invoke('app:export-diagnostics'),saveSelection.filePath);
+    const report=JSON.parse(await fs.readFile(saveSelection.filePath,'utf8'));
+    assert.equal(report.app.version,'9.8.7');assert.equal(report.tasks[0].status,'running');
+    assert.ok(report.logs.entries.some((entry:any)=>entry.event==='task_phase'&&entry.phase==='waiting_model'));
+    assert.ok(report.logs.entries.some((entry:any)=>entry.event==='ipc_error'));
+    assert.ok(!JSON.stringify(report).includes('新的任务名称'));assert.ok(!JSON.stringify(report).includes(root));
     worker.emit('message',{type:'approval',runId:run.id,approval:{id:randomUUID(),command:'node --version',cwd:root,timeout:1}});
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'approval');
     worker.emit('message',{type:'approval-resolved',runId:run.id});

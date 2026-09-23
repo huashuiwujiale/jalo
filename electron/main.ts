@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, utilityProcess, type UtilityProcess } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, shell, utilityProcess, type UtilityProcess } from 'electron';
+import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -7,16 +8,24 @@ import { z } from 'zod';
 import { captureReferences, previewFile, searchFiles, listDirectory, rollbackPreview, restoreFile } from '../engine/project-files';
 import { createTwoFilesPatch } from 'diff';
 import { Store } from './store';
+import { DiagnosticLog, diagnosticReport, errorCategory, saveDiagnosticReport } from './diagnostics';
 import { LMStudioProvider } from '../engine/provider';
 import { settingsSchema, submitSchema } from '../shared/validation';
-import { busyStatuses, type EngineEvent, type Settings, type Snapshot, type Task, type Run, type Progress } from '../shared/types';
+import { busyStatuses, type AppInfo, type EngineEvent, type Settings, type Snapshot, type Task, type Run, type Progress } from '../shared/types';
 
 // Keep legacy identity when upgrading: macOS safeStorage keys also depend on the app name.
 const legacyDataPath = path.join(app.getPath('appData'), 'Local Code');
 const upgradingLegacy = existsSync(path.join(legacyDataPath, 'local-code.sqlite'));
 app.setName(upgradingLegacy ? 'Local Code' : 'Jalo');
 app.setPath('userData', upgradingLegacy ? legacyDataPath : path.join(app.getPath('appData'), 'Jalo'));
-app.setAboutPanelOptions({ applicationName: 'Jalo', applicationVersion: '0.2.0', authors: ['佳乐 (Jiale)'] });
+app.setAboutPanelOptions({ applicationName: 'Jalo', applicationVersion: app.getVersion(), authors: ['佳乐 (Jiale)'] });
+const diagnostics = new DiagnosticLog(app.getPath('userData'));
+let exportingDiagnostics = false;
+function appInfo(): AppInfo {
+  return { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, arch: process.arch,
+    electron: process.versions.electron || '', chrome: process.versions.chrome || '', node: process.versions.node, osRelease: os.release(),
+    dataDirectory: app.getPath('userData'), logDirectory: diagnostics.directory, logsAvailable: diagnostics.available };
+}
 const developmentUrl = app.isPackaged ? undefined : process.env.LOCAL_CODE_DEV_URL;
 let win: BrowserWindow | undefined, store: Store;
 let tasks: Task[] = [];
@@ -27,7 +36,7 @@ const projectLocks = new Set<string>();
 const rollbackTokens = new Map<string, { taskId: string; runId: string; path: string; afterVersion: string; expires: number }>();
 const currentRun = (task: Task) => task.runs?.find(r => r.id === task.currentRunId);
 function syncRun(task: Task) { const run = currentRun(task); if (run) { run.status = task.status; run.error = task.error; if (!busyStatuses.includes(task.status)) { run.endedAt ??= Date.now(); if (run.progress) run.progress.endedAt ??= run.endedAt; } } }
-function progress(task: Task, phase: Progress['phase']) { const run = currentRun(task); if (run) run.progress = { ...run.progress, phase, since: Date.now(), endedAt: undefined }; }
+function progress(task: Task, phase: Progress['phase']) { const run = currentRun(task); if (run) { run.progress = { ...run.progress, phase, since: Date.now(), endedAt: undefined }; diagnostics.record({ event: 'task_phase', taskId: task.id, runId: run.id, phase }); } }
 const uuid = z.string().uuid();
 function settings(): Settings {
   const saved = store.settings();
@@ -47,6 +56,7 @@ function finish(task: Task, status: Task['status'], error?: string) {
   const previous = active;
   clearTimeout(previous.timer); killProcesses(previous.pids);
   task.status = status; task.error = error; task.approval = undefined;
+  diagnostics.record({ event: 'task_finished', taskId: task.id, runId: task.currentRunId, status, ...(error ? { errorCategory: errorCategory(error) } : {}) });
   active = undefined; configs.delete(task.id); previous.worker.kill();
   persist(task); setImmediate(pump);
 }
@@ -61,11 +71,15 @@ function pump() {
     progress(task, 'preparing');
     const worker = utilityProcess.fork(path.join(__dirname, 'worker.cjs'), [], { serviceName: 'Jalo Task', stdio: 'pipe' });
     active = { task, worker, pids: new Set() };
+    diagnostics.record({ event: 'task_started', taskId: task.id, runId: task.currentRunId });
     worker.on('message', (event: EngineEvent) => {
       if (active?.worker !== worker || quitting || event.runId !== task.currentRunId) return;
       const run = currentRun(task);
       if (event.type === 'progress') {
-        if (run && run.progress?.phase !== 'stopping' && !task.approval) { run.progress = event.progress; persist(task); }
+        if (run && run.progress?.phase !== 'stopping' && !task.approval) {
+          run.progress = event.progress; persist(task);
+          diagnostics.record({ event: 'task_phase', taskId: task.id, runId: run.id, phase: event.progress.phase, step: event.progress.step, tool: event.progress.tool });
+        }
         return;
       }
       if (event.type === 'checkpoint') {
@@ -73,14 +87,14 @@ function pump() {
         const index = run.changes.findIndex(c => c.path === event.checkpoint.path);
         if (index < 0) run.changes.push(event.checkpoint); else run.changes[index] = event.checkpoint;
         try { persist(task); worker.postMessage({ type: 'checkpoint-ack', id: event.checkpoint.id }); }
-        catch (e) { worker.postMessage({ type: 'checkpoint-ack', id: event.checkpoint.id, error: '检查点保存失败，禁止写入' }); }
+        catch (e) { diagnostics.record({ event: 'checkpoint_error', taskId: task.id, runId: run.id, errorCategory: errorCategory(e) }); worker.postMessage({ type: 'checkpoint-ack', id: event.checkpoint.id, error: '检查点保存失败，禁止写入' }); }
         return;
       }
       if (event.type === 'check' && run) run.checks.push(event.check);
       if (event.type === 'process') { if (event.running) { active.pids.add(event.pid); if (run?.progress?.phase !== 'stopping') { progress(task, 'command'); persist(task); } } else active.pids.delete(event.pid); return; }
       if (event.type === 'delta') { win?.webContents.send('task:delta', { taskId: task.id, text: event.text }); return; }
       if (event.type === 'messages') task.messages = event.messages;
-      if (event.type === 'event') { task.events.push(event.event); task.events = task.events.slice(-600); }
+      if (event.type === 'event') { task.events.push(event.event); task.events = task.events.slice(-600); if (event.event.kind === 'error') diagnostics.record({ event: 'tool_error', taskId: task.id, runId: task.currentRunId, errorCategory: errorCategory(event.event.text) }); }
       if (event.type === 'change') { if (run && event.checkpoint) { const i = run.changes.findIndex(c => c.path === event.checkpoint!.path); if (i < 0) run.changes.push(event.checkpoint); else run.changes[i] = event.checkpoint; } const index = task.changes.findIndex(c => c.path === event.change.path); if (index < 0) task.changes.push(event.change); else task.changes[index] = event.change; }
       if (event.type === 'approval') { if (run?.progress?.phase === 'stopping') return; task.approval = event.approval; task.status = 'waiting'; progress(task, 'approval'); }
       if (event.type === 'approval-resolved') { task.approval = undefined; task.status = 'running'; if (run?.progress?.phase !== 'stopping') progress(task, 'tool'); }
@@ -89,7 +103,7 @@ function pump() {
     });
     let stderr = '';
     worker.stderr?.on('data', data => { stderr = (stderr + data.toString()).slice(-3000); });
-    worker.on('exit', code => { if (active?.worker === worker) finish(task, 'interrupted', `任务进程意外退出（${code}）。${stderr.slice(-500)} 请检查修改后手动继续。`); });
+    worker.on('exit', code => { if (active?.worker === worker) { diagnostics.record({ event: 'worker_exit', taskId: task.id, runId: task.currentRunId, exitCode: code }); finish(task, 'interrupted', `任务进程意外退出（${code}）。${stderr.slice(-500)} 请检查修改后手动继续。`); } });
     worker.on('spawn', () => worker.postMessage({ type: 'start', task, root: project.path, backupDir: path.join(app.getPath('userData'), 'backups', task.id), settings: configs.get(task.id) || settings() }));
     persist(task);
   } catch (error) {
@@ -102,6 +116,7 @@ function register(channel: string, handler: (...args: any[]) => unknown) {
     if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw new Error('无效的调用来源');
     try { return await handler(...args); }
     catch (error) {
+      diagnostics.record({ event: 'ipc_error', channel, errorCategory: errorCategory(error) });
       if (error instanceof z.ZodError) {
         const labels: Record<string, string> = { maxTokens: '最大输出 Token（128–16384）', contextLength: '上下文长度（4096–262144）', temperature: '温度（0–2）', maxSteps: '最大执行步数（1–100）', commandTimeout: '命令超时（1–600 秒）', baseUrl: '服务地址', prompt: '任务要求' };
         const issue = error.issues[0], key = String(issue.path[0] || '');
@@ -113,6 +128,22 @@ function register(channel: string, handler: (...args: any[]) => unknown) {
 }
 function registerApi() {
   register('app:snapshot', snapshot);
+  register('app:info', appInfo);
+  register('app:open-data', async () => {
+    const error = await shell.openPath(app.getPath('userData'));
+    if (error) throw new Error('无法打开数据目录，请复制设置中显示的路径，在 Finder 中前往该文件夹');
+  });
+  register('app:export-diagnostics', async () => {
+    if (exportingDiagnostics) throw new Error('诊断日志正在导出，请稍候');
+    exportingDiagnostics = true;
+    try {
+      const selection = await dialog.showSaveDialog(win!, { title: '导出诊断日志', defaultPath: `Jalo-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, filters: [{ name: '诊断日志 JSON', extensions: ['json'] }] });
+      if (selection.canceled || !selection.filePath) return null;
+      await saveDiagnosticReport(selection.filePath, diagnosticReport(appInfo(), tasks, diagnostics), app.getPath('userData'));
+      diagnostics.record({ event: 'diagnostics_exported' });
+      return selection.filePath;
+    } finally { exportingDiagnostics = false; }
+  });
   register('project:add', async () => {
     const result = await dialog.showOpenDialog(win!, { title: '选择项目文件夹', properties: ['openDirectory'] });
     if (result.canceled || !result.filePaths[0]) return null;
@@ -235,7 +266,7 @@ function registerApi() {
     task.messages.push({ role: 'user', content: input.prompt + (context ? '\n\n' + context : '') });
     task.events.push({ id: randomUUID(), at: Date.now(), kind: 'message', role: 'user', text: input.prompt, runId: run.id });
     task.model = config.model; task.status = 'queued'; task.queuedAt = Date.now(); task.error = undefined; task.approval = undefined; task.lastRun = undefined;
-    configs.set(task.id, config); persist(task); pump(); return task.id;
+    configs.set(task.id, config); persist(task); diagnostics.record({ event: 'task_queued', taskId: task.id, runId: run.id }); pump(); return task.id;
     } finally { projectLocks.delete(input.projectId); }
   });
   register('task:stop', (id: unknown) => {
@@ -261,6 +292,8 @@ async function createWindow() {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', event => event.preventDefault());
   win.webContents.on('will-attach-webview', event => event.preventDefault());
+  win.webContents.on('render-process-gone', (_event, details) => diagnostics.record({ event: 'renderer_gone', exitCode: details.exitCode }));
+  win.webContents.on('did-fail-load', (_event, code) => diagnostics.record({ event: 'renderer_load_failed', exitCode: code }));
   win.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   if (app.isPackaged) await win.loadFile(path.join(__dirname, '../renderer/index.html'));
   else {
@@ -272,14 +305,17 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { win?.show(); win?.focus(); });
   app.whenReady().then(async () => {
+    diagnostics.record({ event: 'app_start' });
     store = await Store.open(path.join(app.getPath('userData'), 'local-code.sqlite'));
     tasks = store.tasks(); registerApi();
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Jalo', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }, { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }] }]));
     await createWindow();
-  }).catch(error => { dialog.showErrorBox('启动失败', error.message); app.quit(); });
+    diagnostics.record({ event: 'app_ready' });
+  }).catch(error => { diagnostics.record({ event: 'startup_error', errorCategory: errorCategory(error) }); dialog.showErrorBox('启动失败', error.message); app.quit(); });
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', () => {
     if (quitting) return; quitting = true;
+    diagnostics.record({ event: 'app_quit' });
     if (active) { clearTimeout(active.timer); killProcesses(active.pids); active.worker.kill(); }
     if (store) { for (const task of tasks.filter(t => busyStatuses.includes(t.status))) { task.status = 'interrupted'; task.approval = undefined; task.error = '应用已退出，请检查修改后手动继续。'; syncRun(task); store.putTask(task); } store.close(); }
   });
