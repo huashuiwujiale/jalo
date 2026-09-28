@@ -48,6 +48,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const ref={projectId:project.id,path:'a.txt',startLine:1,endLine:1,version:page.version};
     await assert.rejects(invoke('task:submit',{projectId:project.id,prompt:'x',references:[{...ref,projectId:randomUUID()}]}),/其他项目/);
     const taskId=await invoke('task:submit',{projectId:project.id,prompt:'先计划',mode:'plan',references:[ref]});
+    await assert.rejects(invoke('evaluation:start'),/请先停止/);
     const snapshot=()=>invoke('app:snapshot');
     let task=(await snapshot()).tasks.find((t:any)=>t.id===taskId), run=task.runs[0];assert.equal(run.mode,'plan');assert.equal(run.references[0].content,'old');
     await assert.rejects(invoke('task:archive',{taskId,archived:true}),/停止或完成/);
@@ -104,5 +105,18 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await assert.rejects(invoke('task:submit',{projectId:project.id,prompt:'已移除项目'}),/项目/);
     const restored=await invoke('project:add');assert.equal(restored.id,project.id);assert.equal(restored.removedAt,undefined);
     assert.deepEqual((await snapshot()).tasks,beforeRemoval);assert.equal((await snapshot()).projects.length,1);
+    const activeTask=(await snapshot()).tasks.find((t:any)=>['running','waiting','queued'].includes(t.status));
+    if(activeTask)workers.at(-1).emit('message',{type:'done',runId:activeTask.currentRunId,status:'completed'});
+    const evaluationId=await invoke('evaluation:start'), evaluationWorker=workers.at(-1);
+    await new Promise(r=>setImmediate(r));const start=evaluationWorker.sent.find((m:any)=>m.type==='evaluate');assert.ok(start);
+    assert.notEqual(start.home,root);assert.equal(start.settings.model,'mock');
+    await assert.rejects(invoke('settings:save',{...defaults,model:'other'}),/实测/);
+    await assert.rejects(invoke('models:unload','mock'),/实测/);
+    await assert.rejects(invoke('task:submit',{projectId:project.id,prompt:'cannot run'}),/实测/);
+    await assert.rejects(invoke('evaluation:start'),/实测/);
+    await invoke('evaluation:stop',evaluationId);assert.equal(evaluationWorker.sent.at(-1).type,'cancel');
+    evaluationWorker.emit('message',{type:'evaluation-update',report:{...start.report,status:'cancelled'}});evaluationWorker.emit('exit',0);
+    assert.equal((await snapshot()).evaluations[0].status,'cancelled');await assert.rejects(fs.access(start.home));
+    await invoke('settings:save',{...defaults,model:'mock'});
   } finally { Module._load=original;app.emit('before-quit');await fs.rm(home,{recursive:true,force:true}); }
 });

@@ -5,6 +5,8 @@ const subscribe = (channel, fn) => {
   return () => ipcRenderer.removeListener(channel, listener);
 };
 contextBridge.exposeInMainWorld('localCode', Object.freeze({
+  startEvaluation: () => ipcRenderer.invoke('evaluation:start'),
+  stopEvaluation: id => ipcRenderer.invoke('evaluation:stop', id),
   appInfo: () => ipcRenderer.invoke('app:info'),
   openDataDirectory: () => ipcRenderer.invoke('app:open-data'),
   exportDiagnostics: () => ipcRenderer.invoke('app:export-diagnostics'),

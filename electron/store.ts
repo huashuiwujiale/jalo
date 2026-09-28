@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Project, Task, Settings } from '../shared/types';
 import { defaults, busyStatuses } from '../shared/types';
+import { endEvaluation, type EvaluationReport } from '../shared/evaluation';
 
 export class Store {
   private constructor(private db: Database, private file: string) {}
@@ -11,10 +12,13 @@ export class Store {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const db = new SQL.Database(fs.existsSync(file) ? fs.readFileSync(file) : undefined);
     const revision = Number(db.exec('PRAGMA user_version')[0]?.values[0]?.[0] || 0);
-    if (revision < 2 && fs.existsSync(file)) fs.copyFileSync(file, file + '.before-v2-' + Date.now() + '.bak', fs.constants.COPYFILE_EXCL);
+    if (revision < 3 && fs.existsSync(file)) fs.copyFileSync(file, file + `.before-v${revision < 2 ? 2 : 3}-` + Date.now() + '.bak', fs.constants.COPYFILE_EXCL);
     db.run('CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
-    db.run('CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, data TEXT NOT NULL); PRAGMA user_version = 2');
+    db.run('CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
     const store = new Store(db, file);
+    db.run('CREATE TABLE IF NOT EXISTS evaluations (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
+    if (revision < 3) db.run('PRAGMA user_version = 3');
+    for (const report of store.evaluations()) if (report.status === 'running') store.putEvaluation(endEvaluation(report, 'interrupted', '应用退出时实测未完成，请手动重新测试'));
     for (const task of store.tasks()) {
       if (!task.runs?.length) { task.legacy = true; store.putTask(task); }
       for (const run of task.runs || []) { if (busyStatuses.includes(run.status)) { run.status = 'interrupted'; run.endedAt = Date.now(); } if (run.progress && !busyStatuses.includes(run.status)) run.progress.endedAt ??= run.endedAt || Date.now(); for (const change of run.changes) if (change.state === 'prepared') change.state = 'uncertain'; }
@@ -48,6 +52,13 @@ export class Store {
     this.flush();
   }
   putSettings(settings: Settings) { this.put('settings', 'default', settings); }
+  evaluations() { return this.all<EvaluationReport>('evaluations').sort((a, b) => b.createdAt - a.createdAt).slice(0, 10); }
+  putEvaluation(report: EvaluationReport) {
+    this.db.run('INSERT OR REPLACE INTO evaluations (id,data) VALUES (?,?)', [report.id, JSON.stringify(report)]);
+    const keep = new Set(this.evaluations().map(r => r.id));
+    for (const old of this.all<EvaluationReport>('evaluations')) if (!keep.has(old.id)) this.db.run('DELETE FROM evaluations WHERE id = ?', [old.id]);
+    this.flush();
+  }
   flush() {
     const temp = this.file + '.tmp';
     const fd = fs.openSync(temp, 'w', 0o600);

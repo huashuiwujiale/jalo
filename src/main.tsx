@@ -11,6 +11,7 @@ import { TaskProgress, RecoveryPanel } from './task-progress';
 import { recoveryPrompt } from '../shared/progress';
 import { TaskHistory, RemoveProjectDialog } from './task-history';
 import { AppMaintenance } from './app-maintenance';
+import { ModelEvaluation } from './model-evaluation';
 declare global { interface Window { localCode: Api } }
 const statusText: Record<Task['status'], string> = { queued: '排队中', running: '执行中', waiting: '等待确认', completed: '本轮结束', failed: '执行失败', cancelled: '已停止', interrupted: '已中断' };
 const api = window.localCode;
@@ -65,6 +66,7 @@ function App() {
   const project = state.projects.find(p => p.id === projectId);
   const task = state.tasks.find(t => t.id === taskId);
   const isBusy = !!task && busyStatuses.includes(task.status);
+  const evaluating = state.evaluations?.some(r => r.status === 'running');
   const composerLocked = isBusy || !!task?.archivedAt;
   const run = task?.runs?.find(r => r.id === runId) || task?.runs?.at(-1);
   const invalidReferences = references.some(r => r.projectId !== projectId);
@@ -104,6 +106,7 @@ function App() {
   const submit = async (planRunId?: string) => {
     if ((!prompt.trim() && !planRunId) || sending || isBusy) return;
     if (task?.archivedAt) { setError('请先恢复已归档任务，再继续对话'); return; }
+    if (evaluating) { setError('模型能力实测正在运行，请先停止或完成实测'); return; }
     if (invalidReferences && !planRunId) { setError('存在其他项目的失效引用，请移除或重新选择'); return; }
     if (!projectId) { setError('请先添加并选择一个项目文件夹'); return; }
     setSending(true); setError('');
@@ -149,6 +152,7 @@ function App() {
         {task && showLatest && <div className="latest-row"><button className="latest-button" onClick={scrollToLatest}><ChevronDown size={14}/>回到最新</button></div>}
       </div>
       <div className="composer-area">
+        {evaluating && <div className="archived-banner"><span>模型能力实测中，完成或停止后可提交任务。</span><button onClick={() => setSettingsOpen(true)}>查看实测</button></div>}
         {task?.archivedAt && <div className="archived-banner"><span>此任务已归档，恢复后可继续对话。</span><button onClick={() => api.archiveTask(task.id, false).catch(fail)}>恢复任务</button></div>}
         {task && <TaskProgress task={task}/>}
         {task?.approval && <div className="approval"><div><ShieldCheck size={17}/><strong>需要确认终端命令</strong><span>{task.approval.timeout}s 超时</span></div><pre>{task.approval.command}</pre><small>工作目录：{task.approval.cwd}<br/>命令以你的系统用户权限运行。</small><footer><button onClick={() => api.approve(task.id, task.approval!.id, false).catch(fail)}>拒绝</button><button className="primary" onClick={() => api.approve(task.id, task.approval!.id, true).catch(fail)}>允许执行<ArrowRight size={14}/></button></footer></div>}
@@ -180,12 +184,13 @@ function SettingsDialog({ state, close, fail }: { state: Snapshot; close: () => 
   const [working, setWorking] = useState(false);
   const [connected, setConnected] = useState(false);
   const [feedback, setFeedback] = useState('');
-  const locked = state.tasks.some(t => busyStatuses.includes(t.status));
+  const tasksBusy = state.tasks.some(t => busyStatuses.includes(t.status));
+  const locked = tasksBusy || !!state.evaluations?.some(r => r.status === 'running');
   const field = (key: keyof Settings, value: string | number) => setDraft(s => ({ ...s, [key]: value }));
   const perform = async (fn: () => Promise<void>) => { setWorking(true); setFeedback(''); try { await fn(); } catch (e) { setConnected(false); fail(e); } finally { setWorking(false); } };
   useEffect(() => { api.models().then(m => { setModels(m); setConnected(true); }).catch(() => {}); }, []);
   return <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget && !working) close(); }}><section className="settings-modal" role="dialog" aria-modal="true" aria-label="模型与设置"><header><div><span className="settings-icon"><Cpu size={22}/></span><div><h2>模型与设置</h2><p>你的模型，你的工作环境。</p></div></div><button aria-label="关闭设置" disabled={working} onClick={close}><X size={19}/></button></header>
-    {locked && <div className="locked-note">任务执行或排队期间，模型与配置已锁定。请先完成或停止任务。</div>}
+    {locked && <div className="locked-note">任务或模型实测期间，模型与配置已锁定。请先完成或停止运行。</div>}
     <div className="settings-body"><AppMaintenance api={api}/><div className="settings-section-heading"><span>连接 LM Studio</span><small className={connected ? 'connected' : ''}><i className={connected ? 'green-dot' : 'gray-dot'}/>{connected ? '服务可达' : '尚未连接'}</small></div>
       <fieldset disabled={locked || working}><label>服务地址<input value={draft.baseUrl} placeholder="http://127.0.0.1:1234" onChange={e => { field('baseUrl', e.target.value); setConnected(false); }}/></label><label>访问令牌 <small>可选，使用系统加密存储</small><input type="password" autoComplete="off" value={draft.token} placeholder="未启用认证时留空" onChange={e => field('token', e.target.value)}/></label><button className="outline connect-button" onClick={() => perform(async () => { await api.saveSettings(draft); const m = await api.models(); setModels(m); setConnected(true); setFeedback(`连接成功，发现 ${m.length} 个语言模型`); })}><RefreshCw size={14} className={working ? 'spin' : ''}/>保存并检测连接</button></fieldset>
       <div className="settings-section-heading"><span>本地模型</span><small>{models.length} 个可用</small></div>
@@ -194,6 +199,7 @@ function SettingsDialog({ state, close, fail }: { state: Snapshot; close: () => 
       <div className="settings-section-heading"><span>运行参数</span><small>模型任务开始后固定</small></div><fieldset className="parameter-grid" disabled={locked || working}>
         {([{ key: 'contextLength', label: '上下文长度', min: 4096, max: 262144, step: 1024 }, { key: 'maxTokens', label: '最大输出 Token', min: 128, max: 16384, step: 128 }, { key: 'temperature', label: '温度', min: 0, max: 2, step: 0.1 }, { key: 'maxSteps', label: '最大执行步数', min: 1, max: 100, step: 1 }, { key: 'commandTimeout', label: '命令超时（秒）', min: 1, max: 600, step: 1 }] as const).map(p => <label key={p.key}>{p.label}<input type="number" min={p.min} max={p.max} step={p.step} value={draft[p.key]} onChange={e => field(p.key, Number(e.target.value))}/></label>)}
       </fieldset><p className="settings-hint">上下文设置用于加载新实例；已加载模型沿用其实际容量。变更后可卸载再加载。</p>
+      <ModelEvaluation reports={state.evaluations || []} api={api} disabled={tasksBusy || working} model={draft.model} start={async () => { await api.saveSettings(draft); await api.startEvaluation(); }} fail={fail}/>
     </div><footer><span>{feedback || '配置和任务记录保存在这台 Mac 上'}</span><button className="primary" disabled={locked || working} onClick={() => perform(async () => { await api.saveSettings(draft); close(); })}>{working ? <LoaderCircle size={15} className="spin"/> : <Check size={15}/>}保存设置</button></footer>
   </section></div>;
 }

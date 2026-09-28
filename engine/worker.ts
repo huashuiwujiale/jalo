@@ -3,6 +3,7 @@ import { LMStudioProvider } from './provider';
 import { ToolRegistry } from './tools';
 import { captureReferences } from './project-files';
 import { TaskRunner } from './runner';
+import { runEvaluation } from './evaluation';
 const port = (process as any).parentPort;
 if (!port) throw new Error('任务引擎必须由 Electron utilityProcess 启动');
 const controller = new AbortController();
@@ -18,6 +19,11 @@ const approve = (approval: Approval) => new Promise<boolean>(resolve => {
 port.on('message', async ({ data }: any) => {
   if (data.type === 'checkpoint-ack') { const waiting = checkpoints.get(data.id); checkpoints.delete(data.id); if (data.error) waiting?.reject(new Error(data.error)); else waiting?.resolve(); return; }
   if (data.type === 'cancel') { controller.abort(); for (const c of checkpoints.values()) c.reject(new Error('任务已停止')); checkpoints.clear(); pending?.resolve(false); pending = undefined; return; }
+  if (data.type === 'evaluate' && !started) {
+    started = true;
+    await runEvaluation(data.report, data.settings, data.home, controller.signal, report => port.postMessage({ type: 'evaluation-update', report }));
+    return;
+  }
   if (data.type === 'approve') {
     if (pending?.id === data.id) { pending.resolve(data.allow === true); pending = undefined; emit({ type: 'approval-resolved' }); }
     return;

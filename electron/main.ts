@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { captureReferences, previewFile, searchFiles, listDirectory, rollbackPreview, restoreFile } from '../engine/project-files';
 import { createTwoFilesPatch } from 'diff';
 import { Store } from './store';
+import { EvaluationController } from './evaluation';
 import { DiagnosticLog, diagnosticReport, errorCategory, saveDiagnosticReport } from './diagnostics';
 import { LMStudioProvider } from '../engine/provider';
 import { settingsSchema, submitSchema } from '../shared/validation';
@@ -31,6 +32,7 @@ let win: BrowserWindow | undefined, store: Store;
 let tasks: Task[] = [];
 let active: { task: Task; worker: UtilityProcess; timer?: ReturnType<typeof setTimeout>; pids: Set<number> } | undefined;
 let modelOperation = false, quitting = false;
+let evaluation: EvaluationController;
 const configs = new Map<string, Settings>();
 const projectLocks = new Set<string>();
 const rollbackTokens = new Map<string, { taskId: string; runId: string; path: string; afterVersion: string; expires: number }>();
@@ -46,10 +48,10 @@ function settings(): Settings {
   }
   return saved;
 }
-function snapshot(): Snapshot { return { projects: store.projects(), tasks, settings: settings(), activeId: active?.task.id }; }
+function snapshot(): Snapshot { return { projects: store.projects(), tasks, settings: settings(), activeId: active?.task.id, evaluations: evaluation?.reports() || [] }; }
 function broadcast() { if (win && !win.isDestroyed()) win.webContents.send('app:update', snapshot()); }
 function persist(task: Task) { syncRun(task); store.putTask(task); broadcast(); }
-function idleRequired() { if (modelOperation || tasks.some(t => busyStatuses.includes(t.status))) throw new Error('请先停止或完成运行中和排队中的任务，再调整模型或设置'); }
+function idleRequired() { if (evaluation?.busy) throw new Error('模型能力实测正在运行，请先停止或完成实测'); if (modelOperation || tasks.some(t => busyStatuses.includes(t.status))) throw new Error('请先停止或完成运行中和排队中的任务，再调整模型或设置'); }
 function killProcesses(pids: Set<number>) { for (const pid of pids) { try { process.kill(-pid, 'SIGKILL'); } catch {} } }
 function finish(task: Task, status: Task['status'], error?: string) {
   if (!active || active.task.id !== task.id) return;
@@ -61,7 +63,7 @@ function finish(task: Task, status: Task['status'], error?: string) {
   persist(task); setImmediate(pump);
 }
 function pump() {
-  if (active || modelOperation || quitting) return;
+  if (active || modelOperation || evaluation?.busy || quitting) return;
   const task = tasks.filter(t => t.status === 'queued').sort((a, b) => (a.queuedAt || a.createdAt) - (b.queuedAt || b.createdAt))[0];
   if (!task) return;
   const project = store.projects().find(p => p.id === task.projectId);
@@ -127,6 +129,8 @@ function register(channel: string, handler: (...args: any[]) => unknown) {
   });
 }
 function registerApi() {
+  register('evaluation:start', () => { idleRequired(); if (projectLocks.size) throw new Error('项目正在提交或回退，请稍后实测'); return evaluation.start(settings()); });
+  register('evaluation:stop', (id: unknown) => evaluation.stop(uuid.parse(id)));
   register('app:snapshot', snapshot);
   register('app:info', appInfo);
   register('app:open-data', async () => {
@@ -231,6 +235,7 @@ function registerApi() {
     } finally { projectLocks.delete(task.projectId); }
   });
   register('task:submit', async (raw: unknown) => {
+    if (evaluation.busy) throw new Error('模型能力实测正在运行，请结束实测后提交任务');
     const input = submitSchema.parse(raw);
     if (projectLocks.has(input.projectId)) throw new Error('项目正在保存或回退，请稍后提交');
     projectLocks.add(input.projectId);
@@ -307,6 +312,7 @@ else {
   app.whenReady().then(async () => {
     diagnostics.record({ event: 'app_start' });
     store = await Store.open(path.join(app.getPath('userData'), 'local-code.sqlite'));
+    evaluation = new EvaluationController(store, () => utilityProcess.fork(path.join(__dirname, 'worker.cjs'), [], { serviceName: 'Jalo Model Evaluation', stdio: 'pipe' }), broadcast, app.getVersion());
     tasks = store.tasks(); registerApi();
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Jalo', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }, { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }] }]));
     await createWindow();
@@ -316,6 +322,7 @@ else {
   app.on('before-quit', () => {
     if (quitting) return; quitting = true;
     diagnostics.record({ event: 'app_quit' });
+    evaluation?.shutdown();
     if (active) { clearTimeout(active.timer); killProcesses(active.pids); active.worker.kill(); }
     if (store) { for (const task of tasks.filter(t => busyStatuses.includes(t.status))) { task.status = 'interrupted'; task.approval = undefined; task.error = '应用已退出，请检查修改后手动继续。'; syncRun(task); store.putTask(task); } store.close(); }
   });
