@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('localCode', Object.freeze({
   searchFiles: input => ipcRenderer.invoke('files:search', input),
   listDirectory: input => ipcRenderer.invoke('files:list', input),
   previewFile: input => ipcRenderer.invoke('files:preview', input),
+  referenceFile: input => ipcRenderer.invoke('files:reference', input),
   runChanges: (taskId, runId) => ipcRenderer.invoke('runs:changes', { taskId, runId }),
   previewRollback: (taskId, runId, path) => ipcRenderer.invoke('rollback:preview', { taskId, runId, path }),
   confirmRollback: token => ipcRenderer.invoke('rollback:confirm', token),

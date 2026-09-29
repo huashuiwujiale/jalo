@@ -5,7 +5,7 @@ const api: Api = window.localCode;
 type Entry = { path: string; name: string; directory: boolean };
 type Result = Awaited<ReturnType<Api['listDirectory']>>;
 
-function FileIcon({ name }: { name: string }) {
+export function FileIcon({ name }: { name: string }) {
   const extension = name.split('.').at(-1)?.toLowerCase();
   if (extension === 'json') return <FileJson className="file-icon json" size={16}/>;
   if (['ts', 'tsx', 'js', 'jsx', 'vue', 'css', 'html'].includes(extension || '')) return <FileCode2 className={`file-icon ${extension}`} size={16}/>;

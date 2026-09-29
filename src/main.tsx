@@ -9,6 +9,7 @@ import { groupToolEvents } from './tool-events';
 import { ToolCard } from './tool-card';
 import { TaskProgress, RecoveryPanel } from './task-progress';
 import { ContextMeter } from './context-usage';
+import { MentionInput } from './mention-input';
 import { recoveryPrompt } from '../shared/progress';
 import { TaskHistory, RemoveProjectDialog } from './task-history';
 import { AppMaintenance } from './app-maintenance';
@@ -34,6 +35,7 @@ function App() {
   const [selectedFile, setSelectedFile] = useState('');
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
+  const [referencePending, setReferencePending] = useState(false);
   const [streams, setStreams] = useState<Record<string, string>>({});
   const [sessionReady, setSessionReady] = useState(false);
   const [viewRevision, setViewRevision] = useState(0);
@@ -151,7 +153,7 @@ function App() {
   };
   const addProject = async () => { if(sending)return;setSending(true);try { const p = await api.addProject(); if (p) { const snapshot=await api.snapshot();setState(snapshot);openView(restoreView(sessions.current,snapshot,{projectId:p.id,taskId:sessions.current.projectTasks[p.id] || ''})); } } catch (e) { fail(e); } finally {setSending(false);} };
   const submit = async (planRunId?: string) => {
-    if ((!prompt.trim() && !planRunId) || sending || isBusy) return;
+    if ((!prompt.trim() && !planRunId) || sending || referencePending || isBusy) return;
     if (task?.archivedAt) { setError('请先恢复已归档任务，再继续对话'); return; }
     if (evaluating) { setError('模型能力实测正在运行，请先停止或完成实测'); return; }
     if (invalidReferences && !planRunId) { setError('存在其他项目的失效引用，请移除或重新选择'); return; }
@@ -211,12 +213,12 @@ function App() {
         {task && <TaskProgress task={task}/>}
         <ContextMeter usage={run?.contextUsage}/>
         {task?.approval && <div className="approval"><div><ShieldCheck size={17}/><strong>需要确认终端命令</strong><span>{task.approval.timeout}s 超时</span></div><pre>{task.approval.command}</pre><small>工作目录：{task.approval.cwd}<br/>命令以你的系统用户权限运行。</small><footer><button onClick={() => api.approve(task.id, task.approval!.id, false).catch(fail)}>拒绝</button><button className="primary" onClick={() => api.approve(task.id, task.approval!.id, true).catch(fail)}>允许执行<ArrowRight size={14}/></button></footer></div>}
-        <div className="mode-controls"><label>任务模式 <select aria-label="任务模式" value={mode} disabled={sending || composerLocked} onChange={e => setMode(e.target.value as Mode)}>{Object.entries(modeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button disabled={!project || composerLocked || references.length >= 8} onClick={() => setPicker({})}>@ 引用文件</button><small>{mode === 'execute' ? '项目内自动写入，支持安全回退' : mode === 'plan' ? '只读分析，确认计划后执行' : '只审查右侧选定轮次，禁止自动修复'}</small></div>
-        {!!references.length && <div className="reference-chips">{references.map((r, i) => <span className={r.projectId !== projectId ? 'invalid' : ''} key={i} title={state.projects.find(p => p.id === r.projectId)?.path}><button disabled={r.projectId !== projectId} onClick={() => setPicker({ path: r.path })}>{r.path}:{r.startLine}–{r.endLine}{r.projectId !== projectId ? '（项目已切换，引用失效）' : ''}</button><button aria-label="移除引用" onClick={() => setReferences(references.filter((_, j) => j !== i))}>×</button></span>)}</div>}
-        <div className={`composer ${composerLocked ? 'busy' : ''}`}><textarea aria-label="任务要求" maxLength={100000} placeholder={task?.archivedAt ? '恢复任务后可继续对话' : isBusy ? '任务正在执行，可停止后继续补充要求…' : task ? '继续描述你的要求…' : '描述你想完成的任务…'} value={prompt} disabled={composerLocked || sending} onChange={e => { const text = e.target.value; if (text.endsWith('@') && project && references.length < 8) { setPicker({}); setPrompt(text.slice(0, -1)); } else setPrompt(text); }} onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }}/><div className="composer-toolbar"><label className="composer-project" title={project?.path || '选择任务所在项目'}><Folder size={13}/><select aria-label="切换任务项目" value={projectId} disabled={sending || !state.projects.length} onChange={e => chooseProject(e.target.value)}>
+        <div className="mode-controls"><label>任务模式 <select aria-label="任务模式" value={mode} disabled={sending || composerLocked} onChange={e => setMode(e.target.value as Mode)}>{Object.entries(modeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button disabled={!project || sending || referencePending || composerLocked || references.length >= 8} onClick={() => setPicker({})}>@ 引用文件</button><small>{mode === 'execute' ? '项目内自动写入，支持安全回退' : mode === 'plan' ? '只读分析，确认计划后执行' : '只审查右侧选定轮次，禁止自动修复'}</small></div>
+        {!!references.length && <div className="reference-chips">{references.map((r, i) => <span className={r.projectId !== projectId ? 'invalid' : ''} key={i} title={`${state.projects.find(p => p.id === r.projectId)?.path}/${r.path}`}><button disabled={r.projectId !== projectId || sending} onClick={() => setPicker({ path: r.path })}>{r.path}{r.scope === 'file' ? ' · 整个文件' : `:${r.startLine}–${r.endLine}`}{r.projectId !== projectId ? '（项目已切换，引用失效）' : ''}</button><button disabled={sending} aria-label="移除引用" onClick={() => setReferences(references.filter((_, j) => j !== i))}>×</button></span>)}</div>}
+        <div className={`composer ${composerLocked ? 'busy' : ''}`}><MentionInput key={`${projectId}:${taskId}`} api={api} project={project} placeholder={task?.archivedAt ? '恢复任务后可继续对话' : isBusy ? '任务正在执行，可停止后继续补充要求…' : '描述任务，输入 @ 引用文件…'} value={prompt} disabled={composerLocked || sending} canAdd={references.length < 8} onChange={setPrompt} onChoose={ref=>setReferences(old=>[...old.filter(r=>!(r.projectId===ref.projectId && r.path===ref.path)),ref].slice(0,8))} onPending={setReferencePending} submit={()=>void submit()}/><div className="composer-toolbar"><label className="composer-project" title={project?.path || '选择任务所在项目'}><Folder size={13}/><select aria-label="切换任务项目" value={projectId} disabled={sending || !state.projects.length} onChange={e => chooseProject(e.target.value)}>
           {!projectId && <option value="" disabled>未选择项目</option>}
           {state.projects.map(p => <option key={p.id} value={p.id}>{state.projects.filter(other => other.name === p.name).length > 1 ? `${p.name} — ${p.path}` : p.name}</option>)}
-        </select><ChevronDown size={12}/></label><div>{isBusy ? <><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[task!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(task!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
+        </select><ChevronDown size={12}/></label><div>{isBusy ? <><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[task!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(task!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || referencePending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
         <div className="composer-caption"><ShieldCheck size={12}/>推理由你配置的 LM Studio 提供<span>Jalo / 开发版</span></div>
       </div>
     </main>
@@ -225,7 +227,7 @@ function App() {
       <div className="runtime-card"><div><Cpu size={15}/><strong>本地运行环境</strong></div><dl><dt>推理服务</dt><dd>LM Studio</dd><dt>执行引擎</dt><dd>独立进程</dd><dt>任务调度</dt><dd>{state.activeId ? '1 个运行中' : '空闲'}{state.tasks.some(t => t.status === 'queued') ? ` · ${state.tasks.filter(t => t.status === 'queued').length} 个排队` : ''}</dd></dl></div>
     </aside>
     {error && <div className="toast" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={() => setError('')}><X size={16}/></button></div>}
-    {picker && project && <FilePicker key={project.id} project={project} initialPath={picker.path} close={() => setPicker(undefined)} choose={ref => { setReferences(old => [...old.filter(r => !(r.projectId === ref.projectId && r.path === ref.path)), ref].slice(0, 8)); setPicker(undefined); }}/>}
+    {picker && project && <FilePicker key={project.id} project={project} initialPath={picker.path} initialReference={references.find(r=>r.projectId===project.id && r.path===picker.path)} close={() => setPicker(undefined)} choose={ref => { setReferences(old => [...old.filter(r => !(r.projectId === ref.projectId && r.path === ref.path)), ref].slice(0, 8)); setPicker(undefined); }}/>}
     {settingsOpen && <SettingsDialog state={state} close={() => setSettingsOpen(false)} fail={fail}/>}
     {removingProject && <RemoveProjectDialog project={removingProject} close={() => setRemovingProject(undefined)} fail={fail} removed={() => {
       if (removingProject.id === projectId) { const remaining={...state,projects:state.projects.filter(p=>p.id!==projectId)};openView(restoreView(sessions.current,remaining,{projectId:'',taskId:''})); }

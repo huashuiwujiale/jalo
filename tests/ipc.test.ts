@@ -45,6 +45,11 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await assert.rejects(invoke('app:export-diagnostics'),/数据目录之外/);
     const project=await invoke('project:add');await invoke('settings:save',{...defaults,model:'mock'});
     const page=await invoke('files:preview',{projectId:project.id,path:'a.txt'});
+    const whole=await invoke('files:reference',{projectId:project.id,path:'a.txt'});
+    assert.equal(whole.scope,'file');assert.equal(whole.version,page.version);
+    await assert.rejects(invoke('files:reference',{projectId:project.id,path:'../outside'}),/越出/);
+    await assert.rejects(invoke('files:reference',{projectId:project.id,path:'a.txt',extra:true}));
+    await assert.rejects(handlers.get('files:reference')!({sender:{},senderFrame:{}},{projectId:project.id,path:'a.txt'}),/无效的调用来源/);
     assert.equal((await invoke('files:list',{projectId:project.id,path:'.'})).entries[0].name,'a.txt');
     await assert.rejects(invoke('files:list',{projectId:project.id,path:'../'}));
     await assert.rejects(invoke('files:list',{projectId:project.id,path:'.',unexpected:true}));

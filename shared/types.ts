@@ -21,7 +21,7 @@ export interface Message {
 }
 export type Mode = 'execute' | 'plan' | 'review';
 export interface Progress { phase: 'queued' | 'preparing' | 'connecting' | 'loading' | 'probing' | 'waiting_model' | 'generating' | 'tool' | 'approval' | 'command' | 'stopping'; since: number; endedAt?: number; step?: number; maxSteps?: number; tool?: string }
-export interface FileReference { projectId: string; path: string; startLine: number; endLine: number; version: string }
+export interface FileReference { projectId: string; path: string; startLine: number; endLine: number; version: string; scope?: 'file' | 'lines' }
 export interface CapturedReference extends FileReference { content: string }
 export interface FilePage { path: string; version: string; totalLines: number; startLine: number; endLine: number; content: string; hasMore: boolean }
 export interface CheckResult { path: string; status: 'passed' | 'failed' | 'skipped'; parser: string; message: string; at: number; version: string }
@@ -79,6 +79,7 @@ export interface Api {
   searchFiles(input: { projectId: string; query: string }): Promise<{ paths: string[]; truncated: boolean }>;
   listDirectory(input: { projectId: string; path: string }): Promise<{ entries: { path: string; name: string; directory: boolean }[]; truncated: boolean }>;
   previewFile(input: { projectId: string; path: string; startLine?: number }): Promise<FilePage>;
+  referenceFile(input: { projectId: string; path: string }): Promise<FileReference>;
   runChanges(taskId: string, runId: string): Promise<RunChange[]>;
   previewRollback(taskId: string, runId: string, path: string): Promise<RollbackPreview>;
   confirmRollback(token: string): Promise<void>;
