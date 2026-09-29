@@ -76,6 +76,11 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'preparing');
     worker.emit('message',{type:'progress',runId:run.id,progress:{phase:'waiting_model',since:Date.now(),step:1,maxSteps:30}});
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'waiting_model');
+    const usage={inputTokens:5000,toolTokens:1200,outputReserve:1024,safetyReserve:3277,contextLength:16384,beforeTokens:9000,compactions:1};
+    worker.emit('message',{type:'context',runId:'other-run',usage});
+    assert.equal((await snapshot()).tasks[0].runs[0].contextUsage,undefined);
+    worker.emit('message',{type:'context',runId:run.id,usage});
+    assert.deepEqual((await snapshot()).tasks[0].runs[0].contextUsage,usage);
     saveSelection={canceled:false,filePath:path.join(home,'diagnostics.json')};
     assert.equal(await invoke('app:export-diagnostics'),saveSelection.filePath);
     const report=JSON.parse(await fs.readFile(saveSelection.filePath,'utf8'));

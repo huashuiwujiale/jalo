@@ -32,9 +32,13 @@ test('restart freezes progress and marks uncertain checkpoints instead of resumi
   try {
     const file=path.join(home,'state.sqlite');let store=await Store.open(file);
     const t=task();t.status='running';t.runs![1].status='running';delete t.runs![1].progress!.endedAt;
+    t.runs![1].contextUsage={inputTokens:5000,toolTokens:1200,outputReserve:1024,safetyReserve:3277,contextLength:16384,beforeTokens:9000,compactions:1};
+    t.messages=[{role:'assistant',content:'摘要',contextMemory:{version:1,facts:[{tool:'run_command',target:'npm test',status:'denied',detail:'用户拒绝'}],notes:['剩余：人工验收'],instructions:[]}}];
     for (const run of t.runs!) for (const change of run.changes) { change.id = `${run.id}-${change.path}`; change.runId = run.id; }
     store.putTask(t);store.close();store=await Store.open(file);
     const restored=store.tasks()[0];assert.equal(restored.status,'interrupted');assert.ok(restored.runs![1].progress!.endedAt);
+    assert.deepEqual(restored.runs![1].contextUsage,t.runs![1].contextUsage);
+    assert.deepEqual(restored.messages,t.messages);
     assert.equal(restored.runs![1].changes[2].state,'uncertain');store.close();
   } finally { await fs.rm(home,{recursive:true,force:true}); }
 });

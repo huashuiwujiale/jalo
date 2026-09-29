@@ -38,6 +38,10 @@ test('runner reports real request and tool boundaries, including a new wait afte
     const tool = progress.find(e => e.progress.phase === 'tool')!.progress;
     assert.equal(tool.step,1);assert.equal(tool.tool,'write_file');assert.equal(tool.maxSteps,10);
     assert.equal((x.events.at(-1) as any).status,'completed');
+    const usageEvents = x.events.filter((e): e is Extract<EngineEvent,{type:'context'}> => e.type === 'context');
+    assert.equal(usageEvents.length,2);
+    assert.equal(usageEvents[0].usage.contextLength,defaults.contextLength);
+    assert.ok(usageEvents[1].usage.inputTokens > usageEvents[0].usage.inputTokens);
   } finally { await x.cleanup(); }
 });
 test('fabricated tool transcripts fail verification and never edit files or enter model history', async () => {
@@ -109,6 +113,28 @@ test('empty retry allowance is per task run, not replenished after every success
     assert.equal((x.events.at(-1) as any).status, 'failed');
     assert.equal(x.events.filter(e => e.type === 'event' && e.event.kind === 'notice' && e.event.text.includes('重试一次')).length, 1);
   } finally { await x.cleanup(); }
+});
+test('compaction is persisted before requesting the model, including when generation fails', async () => {
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'jalo-context-run-'));
+  try {
+    const signal=new AbortController(), events:EngineEvent[]=[], requests:Message[][]=[];
+    const provider=new MockProvider([]);
+    provider.generate=async (messages:Message[])=>{requests.push(messages);throw new Error('模拟推理中断');};
+    const emit=(e:EngineEvent)=>events.push(e);
+    const registry=new ToolRegistry({root,backupDir:path.join(root,'.backups'),signal:signal.signal,timeout:1,emit,approve:async()=>false});
+    const c=call('read_file',{path:'a.txt'});
+    const messages:Message[]=[{role:'user',content:'分析文件'},c.message,{role:'tool',tool_call_id:c.message.tool_calls![0].id,content:'共 200 行；版本 123456789abc\n'+'text\n'.repeat(8000)}];
+    await new TaskRunner(provider,registry,defaults,emit,signal.signal).run({messages},false);
+    assert.equal(requests.length,1);assert.ok(requests[0].some(m=>m.contextMemory));
+    const persisted=events.find(e=>e.type==='messages');assert.ok(persisted?.type==='messages');
+    assert.deepEqual(persisted.messages,requests[0]);
+    const usage=events.find(e=>e.type==='context');assert.ok(usage?.type==='context');assert.equal(usage.usage.compactions,1);
+    assert.equal((events.at(-1) as any).status,'failed');
+    requests.length=0;events.length=0;
+    await new TaskRunner(provider,registry,defaults,emit,signal.signal).run({messages:[{role:'user',content:'要求'.repeat(50000)}]},false);
+    assert.equal(requests.length,0);assert.ok(events.some(e=>e.type==='context' && e.usage.inputTokens>e.usage.contextLength));
+    assert.match((events.at(-1) as any).error,/上下文/);
+  } finally {await fs.rm(root,{recursive:true,force:true});}
 });
 test('compaction preserves latest user position and chronological tool results across continuations', () => {
   const messages: Message[] = [{ role: 'system', content: 'rules' }, { role: 'user', content: 'original request' }];

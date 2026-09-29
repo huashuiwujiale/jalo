@@ -8,6 +8,7 @@ import './style.css';
 import { groupToolEvents } from './tool-events';
 import { ToolCard } from './tool-card';
 import { TaskProgress, RecoveryPanel } from './task-progress';
+import { ContextMeter } from './context-usage';
 import { recoveryPrompt } from '../shared/progress';
 import { TaskHistory, RemoveProjectDialog } from './task-history';
 import { AppMaintenance } from './app-maintenance';
@@ -208,6 +209,7 @@ function App() {
         {evaluating && <div className="archived-banner"><span>模型能力实测中，完成或停止后可提交任务。</span><button onClick={() => setSettingsOpen(true)}>查看实测</button></div>}
         {task?.archivedAt && <div className="archived-banner"><span>此任务已归档，恢复后可继续对话。</span><button onClick={() => api.archiveTask(task.id, false).catch(fail)}>恢复任务</button></div>}
         {task && <TaskProgress task={task}/>}
+        <ContextMeter usage={run?.contextUsage}/>
         {task?.approval && <div className="approval"><div><ShieldCheck size={17}/><strong>需要确认终端命令</strong><span>{task.approval.timeout}s 超时</span></div><pre>{task.approval.command}</pre><small>工作目录：{task.approval.cwd}<br/>命令以你的系统用户权限运行。</small><footer><button onClick={() => api.approve(task.id, task.approval!.id, false).catch(fail)}>拒绝</button><button className="primary" onClick={() => api.approve(task.id, task.approval!.id, true).catch(fail)}>允许执行<ArrowRight size={14}/></button></footer></div>}
         <div className="mode-controls"><label>任务模式 <select aria-label="任务模式" value={mode} disabled={sending || composerLocked} onChange={e => setMode(e.target.value as Mode)}>{Object.entries(modeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button disabled={!project || composerLocked || references.length >= 8} onClick={() => setPicker({})}>@ 引用文件</button><small>{mode === 'execute' ? '项目内自动写入，支持安全回退' : mode === 'plan' ? '只读分析，确认计划后执行' : '只审查右侧选定轮次，禁止自动修复'}</small></div>
         {!!references.length && <div className="reference-chips">{references.map((r, i) => <span className={r.projectId !== projectId ? 'invalid' : ''} key={i} title={state.projects.find(p => p.id === r.projectId)?.path}><button disabled={r.projectId !== projectId} onClick={() => setPicker({ path: r.path })}>{r.path}:{r.startLine}–{r.endLine}{r.projectId !== projectId ? '（项目已切换，引用失效）' : ''}</button><button aria-label="移除引用" onClick={() => setReferences(references.filter((_, j) => j !== i))}>×</button></span>)}</div>}

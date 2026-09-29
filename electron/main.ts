@@ -81,6 +81,7 @@ function pump() {
     worker.on('message', (event: EngineEvent) => {
       if (active?.worker !== worker || quitting || event.runId !== task.currentRunId) return;
       const run = currentRun(task);
+      if (event.type === 'context') { if (run) { run.contextUsage = event.usage; persist(task); } return; }
       if (event.type === 'progress') {
         if (run && run.progress?.phase !== 'stopping' && !task.approval) {
           run.progress = event.progress; persist(task);

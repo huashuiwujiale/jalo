@@ -1,4 +1,5 @@
 import type { LocalModel, Message, Settings, ToolCall } from '../shared/types';
+import { modelMessages } from '../shared/context';
 export interface ToolDefinition { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }
 export interface Completion { message: Message; finishReason: string; reasoningCharacters?: number }
 export interface ModelProvider {
@@ -49,7 +50,7 @@ export class LMStudioProvider implements ModelProvider {
   async unload(instance: string, signal?: AbortSignal) { await this.request('/api/v1/models/unload', { instance_id: instance }, signal); }
   async generate(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, delta: (text: string) => void, forceTool?: string, activity?: () => void): Promise<Completion> {
     const response = await this.request('/v1/chat/completions', {
-      model: this.settings.model, messages, tools, stream: true,
+      model: this.settings.model, messages: modelMessages(messages), tools, stream: true,
       temperature: this.settings.temperature, max_tokens: this.settings.maxTokens,
       // LM Studio accepts string tool_choice values; the probe exposes only its one allowed tool.
       tool_choice: forceTool ? 'required' : 'auto',

@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { EngineEvent, Message, Settings, Task, Progress } from '../shared/types';
 import type { Completion, ModelProvider, ToolDefinition } from './provider';
 import { definitions, EditMatchError, ToolRegistry } from './tools';
-import { compactContext } from './context';
+import { compactContext, contextUsage } from './context';
+import { modelMessages } from '../shared/context';
 import { unsupportedCompletion } from './completion';
 
 const systemPrompt = `你是本地编程助手，用中文协助用户修改当前项目。先理解任务和项目，再做最小且完整的修改。
@@ -29,6 +30,22 @@ export class TaskRunner {
     const editFailures = new Map<string, number>();
     let emptyRetries = 0;
     let evidenceRetries = 0;
+    let compactions = 0;
+    const prepareContext = () => {
+      try {
+        const context = compactContext(messages, definitions, this.settings.contextLength, this.settings.maxTokens);
+        messages = context.messages;
+        if (context.compacted) {
+          compactions++;
+          this.notice('已压缩较早执行记录：完整保留用户要求，分别记录工具结果、失败原因和待办线索；编辑前需重新读取。');
+          this.emit({type:'messages',messages});
+        }
+        this.emit({type:'context',usage:{...context.usage,compactions}});
+      } catch (error) {
+        this.emit({type:'context',usage:{...contextUsage(messages, definitions, this.settings.contextLength, this.settings.maxTokens),compactions}});
+        throw error;
+      }
+    };
     try {
       this.progress('preparing');
       await this.tools.init();
@@ -46,9 +63,7 @@ export class TaskRunner {
       for (let step = 0; step < this.settings.maxSteps; step++) {
         this.progress('preparing', step + 1);
         this.signal.throwIfAborted();
-        const context = compactContext(messages, definitions, this.settings.contextLength, this.settings.maxTokens);
-        messages = context.messages;
-        if (context.compacted) this.notice('已压缩较早执行记录，保留用户要求和最近工具结果');
+        prepareContext();
         this.notice(`执行步骤 ${step + 1} / ${this.settings.maxSteps}`);
         let completion: Completion;
         for (;;) {
@@ -69,9 +84,9 @@ export class TaskRunner {
           this.notice(`模型${reason}，正在重试一次；不会重放已执行的工具。`);
           // Keep tool results and the latest request; do not restart the task or replay tools.
           messages = messages.map(m => m.role === 'system' ? { ...m, content: `${m.content}\n恢复提示：上一次生成没有有效回复。请响应最后一条用户要求；需要操作时返回结构化工具调用，否则给出明确文字说明，不要返回空白。已执行操作以工具结果为准。` } : m);
-          messages = compactContext(messages, definitions, this.settings.contextLength, this.settings.maxTokens).messages;
+          prepareContext();
         }
-        const assistant = completion.message;
+        const assistant = modelMessages([completion.message])[0];
         const calls = assistant.tool_calls || [];
         if (!calls.length) {
           const evidence = this.tools.evidence();

@@ -17,6 +17,7 @@ export interface ToolCall { id: string; type: 'function'; function: { name: stri
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null;
   tool_calls?: ToolCall[]; tool_call_id?: string;
+  contextMemory?: import('./context').ContextMemory;
 }
 export type Mode = 'execute' | 'plan' | 'review';
 export interface Progress { phase: 'queued' | 'preparing' | 'connecting' | 'loading' | 'probing' | 'waiting_model' | 'generating' | 'tool' | 'approval' | 'command' | 'stopping'; since: number; endedAt?: number; step?: number; maxSteps?: number; tool?: string }
@@ -25,7 +26,7 @@ export interface CapturedReference extends FileReference { content: string }
 export interface FilePage { path: string; version: string; totalLines: number; startLine: number; endLine: number; content: string; hasMore: boolean }
 export interface CheckResult { path: string; status: 'passed' | 'failed' | 'skipped'; parser: string; message: string; at: number; version: string }
 export interface RunChange extends Change { id: string; runId: string; beforeVersion: string | null; afterVersion: string; check: CheckResult; state: 'prepared' | 'written' | 'reverted' | 'uncertain'; revertedAt?: number }
-export interface Run { id: string; taskId: string; mode: Mode; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress }
+export interface Run { id: string; taskId: string; mode: Mode; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
 export interface SubmitInput { projectId: string; prompt: string; taskId?: string; mode?: Mode; references?: FileReference[]; planRunId?: string; reviewRunId?: string }
 export interface RollbackPreview { token: string; patch: string; path: string; createsRecoveryCopy: boolean }
 export interface Change { path: string; before: string | null; after: string; patch: string }
@@ -44,6 +45,7 @@ export interface AppInfo {
   dataDirectory: string; logDirectory: string; logsAvailable: boolean;
 }
 export type EngineEvent = (
+  | { type: 'context'; usage: import('./context').ContextUsage }
   | { type: 'progress'; progress: Progress }
   | { type: 'process'; pid: number; running: boolean }
   | { type: 'delta'; text: string }
