@@ -12,6 +12,8 @@ import { recoveryPrompt } from '../shared/progress';
 import { TaskHistory, RemoveProjectDialog } from './task-history';
 import { AppMaintenance } from './app-maintenance';
 import { ModelEvaluation } from './model-evaluation';
+import { emptySession, emptyView, rememberView, restoreView, viewKey, type SessionView } from '../shared/session';
+import { capturePosition, restorePosition } from './session-scroll';
 declare global { interface Window { localCode: Api } }
 const statusText: Record<Task['status'], string> = { queued: '排队中', running: '执行中', waiting: '等待确认', completed: '本轮结束', failed: '执行失败', cancelled: '已停止', interrupted: '已中断' };
 const api = window.localCode;
@@ -32,6 +34,12 @@ function App() {
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
   const [streams, setStreams] = useState<Record<string, string>>({});
+  const [sessionReady, setSessionReady] = useState(false);
+  const [viewRevision, setViewRevision] = useState(0);
+  const sessions = useRef(emptySession());
+  const currentView = useRef<SessionView>(emptyView(''));
+  const pendingPosition = useRef<SessionView['scroll'] | undefined>(undefined);
+  const restoredTop = useRef<number | undefined>(undefined);
   const conversation = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const previousScrollTop = useRef(0);
@@ -45,16 +53,19 @@ function App() {
     if (Math.abs(element.scrollTop - bottom) > 1) element.scrollTop = bottom;
     previousScrollTop.current = element.scrollTop;
     setShowLatest(false);
+    rememberCurrent();
   };
   const pauseFollowing = () => {
     followLatest.current = false;
     setShowLatest(true);
+    rememberCurrent();
   };
   const handleConversationScroll = () => {
     const element = conversation.current;
     if (!element) return;
     const bottom = Math.max(0, element.scrollHeight - element.clientHeight);
     const scrollTop = Math.max(0, Math.min(element.scrollTop, bottom));
+    if (restoredTop.current !== undefined) { const ignored = Math.abs(scrollTop - restoredTop.current) < 1; restoredTop.current = undefined; if (ignored) return; }
     const movedUp = scrollTop < previousScrollTop.current - 1;
     const atBottom = bottom - scrollTop <= 4;
     // Resizing or collapsing content can lower scrollTop while still at the bottom.
@@ -62,6 +73,7 @@ function App() {
     else if (movedUp) followLatest.current = false;
     previousScrollTop.current = scrollTop;
     setShowLatest(!followLatest.current);
+    rememberCurrent();
   };
   const project = state.projects.find(p => p.id === projectId);
   const task = state.tasks.find(t => t.id === taskId);
@@ -72,9 +84,28 @@ function App() {
   const invalidReferences = references.some(r => r.projectId !== projectId);
   const projectBusy = state.tasks.some(t => t.projectId === projectId && busyStatuses.includes(t.status));
   const fail = (e: unknown) => setError((e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': Error: /, ''));
+  function persistView(view: SessionView) {
+    rememberView(sessions.current, view);
+    void api.saveView(view).catch(fail);
+  }
+  function rememberCurrent() {
+    if (!sessionReady) return;
+    const view = { ...currentView.current, scroll: capturePosition(conversation.current, followLatest.current) };
+    currentView.current = view; persistView(view);
+  }
+  function openView(view: SessionView, saveCurrent = true) {
+    if (saveCurrent) rememberCurrent();
+    currentView.current = view; pendingPosition.current = view.scroll;
+    setProjectId(view.projectId); setTaskId(view.taskId); setPrompt(view.prompt); setMode(view.mode); setReferences(view.references);
+    setRunId(view.runId); setTab(view.tab); setPicker(undefined); setSelectedFile(''); setError('');
+    setViewRevision(value => value + 1);
+  }
   useEffect(() => {
     if (!api) { setError('请通过 npm run dev 打开桌面应用；普通浏览器无法访问本地工具。'); return; }
-    api.snapshot().then(s => { setState(s); setProjectId(s.projects[0]?.id || ''); }).catch(fail);
+    Promise.all([api.snapshot(), api.loadSession()]).then(([s, saved]) => {
+      sessions.current = saved.state; setState(s); openView(restoreView(saved.state,s),false); setSessionReady(true);
+      if (saved.warning) setError(saved.warning);
+    }).catch(fail);
     const offState = api.onUpdate(s => {
       setState(s);
       setStreams(previous => { const next = { ...previous }; for (const t of s.tasks) { if (!busyStatuses.includes(t.status) || t.events.at(-1)?.role === 'assistant') delete next[t.id]; } return next; });
@@ -82,8 +113,24 @@ function App() {
     const offDelta = api.onDelta(({ taskId, text }) => setStreams(old => ({ ...old, [taskId]: (old[taskId] || '') + text })));
     return () => { offState(); offDelta(); };
   }, []);
-  // Opening a task starts at its latest entry; subsequent updates respect reading position.
-  useLayoutEffect(() => { scrollToLatest(); }, [taskId]);
+  useLayoutEffect(() => {
+    const element=conversation.current, saved=pendingPosition.current;
+    if (!sessionReady || !element || !saved) return;
+    pendingPosition.current=undefined; followLatest.current=saved.follow;
+    previousScrollTop.current=restorePosition(element,saved);restoredTop.current=element.scrollTop;
+    setShowLatest(!saved.follow);
+  }, [sessionReady, viewRevision]);
+  useLayoutEffect(() => {
+    if (!sessionReady) return;
+    currentView.current = { projectId,taskId,prompt,mode,references,runId,tab,scroll:capturePosition(conversation.current,followLatest.current) };
+    persistView(currentView.current);
+  }, [sessionReady,viewRevision,projectId,taskId,prompt,mode,references,runId,tab]);
+  useEffect(() => {
+    if (!sessionReady) return;
+    const flush = () => { api.flushView({ ...currentView.current, scroll:capturePosition(conversation.current,followLatest.current) }); };
+    window.addEventListener('beforeunload',flush);
+    return () => window.removeEventListener('beforeunload',flush);
+  },[sessionReady]);
   useLayoutEffect(() => {
     if (followLatest.current) scrollToLatest();
   }, [task?.events.length, task?.events.at(-1)?.id, streams[taskId], task?.approval?.id, task?.status]);
@@ -96,13 +143,12 @@ function App() {
     observer.observe(element);
     if (element.firstElementChild) observer.observe(element.firstElementChild);
     return () => observer.disconnect();
-  }, [taskId]);
+  }, [sessionReady, projectId, taskId]);
   const chooseProject = (id: string) => {
     if (sending || id === projectId || !state.projects.some(p => p.id === id)) return;
-    // A task stays bound to its original project; keep only the unsent draft.
-    setProjectId(id); setPicker(undefined); setRunId(''); setTaskId(''); setSelectedFile(''); setTab('changes'); setError('');
+    openView(restoreView(sessions.current,state,{projectId:id,taskId:sessions.current.projectTasks[id] || ''}));
   };
-  const addProject = async () => { try { const p = await api.addProject(); if (p) { setProjectId(p.id); setTaskId(''); setPrompt(''); } } catch (e) { fail(e); } };
+  const addProject = async () => { if(sending)return;setSending(true);try { const p = await api.addProject(); if (p) { const snapshot=await api.snapshot();setState(snapshot);openView(restoreView(sessions.current,snapshot,{projectId:p.id,taskId:sessions.current.projectTasks[p.id] || ''})); } } catch (e) { fail(e); } finally {setSending(false);} };
   const submit = async (planRunId?: string) => {
     if ((!prompt.trim() && !planRunId) || sending || isBusy) return;
     if (task?.archivedAt) { setError('请先恢复已归档任务，再继续对话'); return; }
@@ -110,15 +156,22 @@ function App() {
     if (invalidReferences && !planRunId) { setError('存在其他项目的失效引用，请移除或重新选择'); return; }
     if (!projectId) { setError('请先添加并选择一个项目文件夹'); return; }
     setSending(true); setError('');
-    try { const id = await api.submit({ projectId, prompt: planRunId ? '按关联计划执行，先重新读取文件，再完成修改和核验。' : prompt, mode: planRunId ? 'execute' : mode, references: planRunId ? [] : references, ...(planRunId ? { planRunId } : {}), ...(mode === 'review' && !planRunId && run ? { reviewRunId: run.id } : {}), ...(taskId ? { taskId } : {}) }); setTaskId(id); setRunId(''); if (planRunId) setMode('execute'); setPrompt(''); setReferences([]); scrollToLatest(); } catch (e) { fail(e); }
+    const submitted = { ...currentView.current };
+    try {
+      const id = await api.submit({ projectId, prompt: planRunId ? '按关联计划执行，先重新读取文件，再完成修改和核验。' : prompt, mode: planRunId ? 'execute' : mode, references: planRunId ? [] : references, ...(planRunId ? { planRunId } : {}), ...(mode === 'review' && !planRunId && run ? { reviewRunId: run.id } : {}), ...(taskId ? { taskId } : {}) });
+      const next: SessionView = { ...submitted, taskId:id, runId:'', mode:planRunId ? 'execute' : mode, prompt:planRunId ? submitted.prompt : '', references:planRunId ? submitted.references : [], scroll:emptyView(projectId).scroll };
+      if(!submitted.taskId)persistView({...next,taskId:''});
+      openView(next,false);
+    } catch (e) { fail(e); }
     finally { setSending(false); }
   };
-  const chooseTask = (t: Task) => { setRunId(''); setReferences([]); setPicker(undefined); setTaskId(t.id); setProjectId(t.projectId); setPrompt(''); setSelectedFile(''); };
-  const newTask = () => { setRunId(''); setReferences([]); setPicker(undefined); setTaskId(''); setPrompt(''); setSelectedFile(''); };
+  const chooseTask = (t: Task) => { if(sending || t.id===taskId)return;openView(restoreView(sessions.current,state,{projectId:t.projectId,taskId:t.id})); };
+  const newTask = () => { if(sending || !taskId)return;openView(restoreView(sessions.current,state,{projectId,taskId:''})); };
+  if(!sessionReady)return <div className="session-loading" role="status">{error || '正在恢复本地会话…'}{error && <button onClick={()=>window.location.reload()}>重试</button>}</div>;
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="traffic-space"/><div className="brand"><span className="brand-mark"><Code2 size={19}/></span><span>Jalo<span className="brand-label">本地编程助手</span></span></div>
-      <button className="new-task" onClick={newTask}><Plus size={17}/>新建任务<span className="keycap">N</span></button>
+      <button className="new-task" disabled={sending} onClick={newTask}><Plus size={17}/>新建任务<span className="keycap">N</span></button>
       <div className="section-label">工作空间<button title="添加项目" onClick={addProject}><FolderPlus size={15}/></button></div>
       <div className="projects">{state.projects.map(p => <div className="project-row" key={p.id}><button className={`project-item ${p.id === projectId ? 'selected' : ''}`} title={p.path} disabled={sending} onClick={() => chooseProject(p.id)}><Folder size={16}/><span>{p.name}</span>{p.id === projectId && <span className="selected-dot"/>}</button><button className="remove-project" title="移除项目（保留文件和历史）" aria-label={`移除项目：${p.name}`} disabled={sending || state.tasks.some(t => t.projectId === p.id && busyStatuses.includes(t.status))} onClick={() => setRemovingProject(p)}><X size={13}/></button></div>)}{!state.projects.length && <button className="empty-project" onClick={addProject}><FolderPlus size={17}/>添加第一个项目</button>}</div>
       <TaskHistory key={projectId} tasks={state.tasks} projectId={projectId} taskId={taskId} choose={chooseTask} disabled={sending} fail={fail}/>
@@ -127,7 +180,7 @@ function App() {
     <main className="workspace">
       <header className="topbar"><div className="breadcrumb"><Folder size={15}/><span>{project?.name || '选择工作空间'}</span><span className="slash">/</span><strong>{task ? '任务详情' : '新建任务'}</strong></div><button className="model-pill" onClick={() => setSettingsOpen(true)}><span className={state.settings.model ? 'green-dot' : 'gray-dot'}/><span>{state.settings.model || '连接本地模型'}</span><ChevronDown size={13}/></button></header>
       <div className="conversation-pane">
-      <div className="conversation" ref={conversation} onScroll={handleConversationScroll}
+      <div className="conversation" key={viewKey(projectId,taskId)} ref={conversation} onScroll={handleConversationScroll} onToggleCapture={() => rememberCurrent()}
         onWheel={event => { if (event.deltaY < 0) pauseFollowing(); }}
         onKeyDown={event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) pauseFollowing(); }}
         onClickCapture={event => { if ((event.target as HTMLElement).closest('summary')) pauseFollowing(); }}
@@ -135,7 +188,7 @@ function App() {
         {!task ? <section className="welcome"><div className="welcome-icon"><Code2 size={31}/><span/></div><div className="eyebrow">YOUR LOCAL WORKSPACE</div><h1>把想法，变成代码。</h1><p>连接你自己的模型，在熟悉的项目里开始工作。<br/>从理解代码到完成修改，每一步都清晰可见。</p><div className="suggestions">
           {[{ icon: Folder, title: '了解这个项目', text: '阅读项目结构和 AGENTS.md，介绍技术栈、主要模块与启动方式。暂不修改文件。' }, { icon: Code2, title: '检查一段实现', text: '检查项目的主要入口与核心逻辑，找出一个有明确证据的问题，先说明原因和修改建议。' }, { icon: GitBranch, title: '开始一个改动', text: '我想在这个项目中实现一个功能：' }].map(item => <button key={item.title} onClick={() => setPrompt(item.text)}><item.icon size={18}/><span>{item.title}</span><ArrowRight size={15}/></button>)}
           </div><div className="welcome-foot"><ShieldCheck size={14}/>项目内自动编辑 · 终端命令逐次确认</div></section> : <div className="timeline"><div className="task-heading"><span className={`status-tag ${task.status}`}>{statusText[task.status]}</span><span>{new Date(task.createdAt).toLocaleString('zh-CN')}</span></div>
-          {groupToolEvents(task.events).map(e => e.kind === 'tool-group' ? <ToolCard key={e.id} group={e} active={busyStatuses.includes(task.status) && (!e.call.runId || e.call.runId === task.currentRunId)} waiting={task.status === 'waiting'}/> : e.kind === 'message' ? <article key={e.id} className={`message ${e.role}`}><div className="message-author">{e.role === 'user' ? <span className="avatar user-avatar">你</span> : <span className="avatar assistant-avatar"><Code2 size={15}/></span>}<strong>{e.role === 'user' ? '你' : 'Jalo'}</strong></div><div className="message-text">{e.text}</div></article> : e.kind === 'output' ? null : e.kind === 'notice' ? <div key={e.id} className="progress-line"><span/>{e.text}</div> : <details key={e.id} className={`tool-event ${e.kind}`}><summary><Terminal size={13}/><span>{e.text.split('\n')[0].slice(0, 150)}</span><ChevronDown size={12}/></summary><pre>{e.text}</pre></details>)}
+          {groupToolEvents(task.events).map(e => e.kind === 'tool-group' ? <ToolCard key={e.id} group={e} active={busyStatuses.includes(task.status) && (!e.call.runId || e.call.runId === task.currentRunId)} waiting={task.status === 'waiting'}/> : e.kind === 'message' ? <article key={e.id} data-event-id={e.id} className={`message ${e.role}`}><div className="message-author">{e.role === 'user' ? <span className="avatar user-avatar">你</span> : <span className="avatar assistant-avatar"><Code2 size={15}/></span>}<strong>{e.role === 'user' ? '你' : 'Jalo'}</strong></div><div className="message-text">{e.text}</div></article> : e.kind === 'output' ? null : e.kind === 'notice' ? <div key={e.id} data-event-id={e.id} className="progress-line"><span/>{e.text}</div> : <details key={e.id} data-event-id={e.id} className={`tool-event ${e.kind}`}><summary><Terminal size={13}/><span>{e.text.split('\n')[0].slice(0, 150)}</span><ChevronDown size={12}/></summary><pre>{e.text}</pre></details>)}
           {streams[taskId] && <article className="message assistant"><div className="message-author"><span className="avatar assistant-avatar"><Code2 size={15}/></span><strong>Jalo</strong><LoaderCircle className="spin" size={13}/></div><div className="message-text">{streams[taskId]}<span className="cursor"/></div></article>}
           <RecoveryPanel task={task} disabled={sending || composerLocked} resume={() => {
             const latest = task.runs?.find(r => r.id === task.currentRunId) || task.runs?.at(-1);
@@ -158,7 +211,7 @@ function App() {
         {task?.approval && <div className="approval"><div><ShieldCheck size={17}/><strong>需要确认终端命令</strong><span>{task.approval.timeout}s 超时</span></div><pre>{task.approval.command}</pre><small>工作目录：{task.approval.cwd}<br/>命令以你的系统用户权限运行。</small><footer><button onClick={() => api.approve(task.id, task.approval!.id, false).catch(fail)}>拒绝</button><button className="primary" onClick={() => api.approve(task.id, task.approval!.id, true).catch(fail)}>允许执行<ArrowRight size={14}/></button></footer></div>}
         <div className="mode-controls"><label>任务模式 <select aria-label="任务模式" value={mode} disabled={sending || composerLocked} onChange={e => setMode(e.target.value as Mode)}>{Object.entries(modeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button disabled={!project || composerLocked || references.length >= 8} onClick={() => setPicker({})}>@ 引用文件</button><small>{mode === 'execute' ? '项目内自动写入，支持安全回退' : mode === 'plan' ? '只读分析，确认计划后执行' : '只审查右侧选定轮次，禁止自动修复'}</small></div>
         {!!references.length && <div className="reference-chips">{references.map((r, i) => <span className={r.projectId !== projectId ? 'invalid' : ''} key={i} title={state.projects.find(p => p.id === r.projectId)?.path}><button disabled={r.projectId !== projectId} onClick={() => setPicker({ path: r.path })}>{r.path}:{r.startLine}–{r.endLine}{r.projectId !== projectId ? '（项目已切换，引用失效）' : ''}</button><button aria-label="移除引用" onClick={() => setReferences(references.filter((_, j) => j !== i))}>×</button></span>)}</div>}
-        <div className={`composer ${composerLocked ? 'busy' : ''}`}><textarea aria-label="任务要求" placeholder={task?.archivedAt ? '恢复任务后可继续对话' : isBusy ? '任务正在执行，可停止后继续补充要求…' : task ? '继续描述你的要求…' : '描述你想完成的任务…'} value={prompt} disabled={composerLocked} onChange={e => { const text = e.target.value; if (text.endsWith('@') && project && references.length < 8) { setPicker({}); setPrompt(text.slice(0, -1)); } else setPrompt(text); }} onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }}/><div className="composer-toolbar"><label className="composer-project" title={project?.path || '选择任务所在项目'}><Folder size={13}/><select aria-label="切换任务项目" value={projectId} disabled={sending || !state.projects.length} onChange={e => chooseProject(e.target.value)}>
+        <div className={`composer ${composerLocked ? 'busy' : ''}`}><textarea aria-label="任务要求" maxLength={100000} placeholder={task?.archivedAt ? '恢复任务后可继续对话' : isBusy ? '任务正在执行，可停止后继续补充要求…' : task ? '继续描述你的要求…' : '描述你想完成的任务…'} value={prompt} disabled={composerLocked || sending} onChange={e => { const text = e.target.value; if (text.endsWith('@') && project && references.length < 8) { setPicker({}); setPrompt(text.slice(0, -1)); } else setPrompt(text); }} onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }}/><div className="composer-toolbar"><label className="composer-project" title={project?.path || '选择任务所在项目'}><Folder size={13}/><select aria-label="切换任务项目" value={projectId} disabled={sending || !state.projects.length} onChange={e => chooseProject(e.target.value)}>
           {!projectId && <option value="" disabled>未选择项目</option>}
           {state.projects.map(p => <option key={p.id} value={p.id}>{state.projects.filter(other => other.name === p.name).length > 1 ? `${p.name} — ${p.path}` : p.name}</option>)}
         </select><ChevronDown size={12}/></label><div>{isBusy ? <><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[task!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(task!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
@@ -173,7 +226,7 @@ function App() {
     {picker && project && <FilePicker key={project.id} project={project} initialPath={picker.path} close={() => setPicker(undefined)} choose={ref => { setReferences(old => [...old.filter(r => !(r.projectId === ref.projectId && r.path === ref.path)), ref].slice(0, 8)); setPicker(undefined); }}/>}
     {settingsOpen && <SettingsDialog state={state} close={() => setSettingsOpen(false)} fail={fail}/>}
     {removingProject && <RemoveProjectDialog project={removingProject} close={() => setRemovingProject(undefined)} fail={fail} removed={() => {
-      if (removingProject.id === projectId) { setProjectId(state.projects.find(p => p.id !== projectId)?.id || ''); newTask(); }
+      if (removingProject.id === projectId) { const remaining={...state,projects:state.projects.filter(p=>p.id!==projectId)};openView(restoreView(sessions.current,remaining,{projectId:'',taskId:''})); }
     }}/>}
   </div>;
 }

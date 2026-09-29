@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Archive, ArchiveRestore, Pencil, MessageSquare, Search } from 'lucide-react';
 import { busyStatuses, type Api, type Project, type Task } from '../shared/types';
 import { filterTasks } from '../shared/task-history';
@@ -7,6 +7,8 @@ const statuses: Record<Task['status'], string> = { queued:'排队中',running:'�
 export function TaskHistory({ tasks, projectId, taskId, choose, disabled, fail }: { tasks: Task[]; projectId: string; taskId: string; choose: (task: Task) => void; disabled: boolean; fail: (error: unknown) => void }) {
   const [query, setQuery] = useState(''), [archived, setArchived] = useState(false);
   const [rename, setRename] = useState<Task>(), [title, setTitle] = useState(''), [saving, setSaving] = useState(false);
+  const selectedTask = tasks.find(t=>t.id===taskId);
+  useEffect(()=>{setArchived(!!selectedTask?.archivedAt);},[taskId,selectedTask?.archivedAt]);
   const visible = filterTasks(tasks, projectId, archived, query);
   const counts = [false,true].map(value => tasks.filter(t => t.projectId === projectId && !!t.archivedAt === value).length);
   async function archive(task: Task) { setSaving(true); try { await api.archiveTask(task.id,!task.archivedAt); } catch(e) { fail(e); } finally { setSaving(false); } }

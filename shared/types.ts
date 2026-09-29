@@ -56,6 +56,9 @@ export type EngineEvent = (
   | { type: 'approval-resolved' }
   | { type: 'done'; status: Status; error?: string; evidence?: RunEvidence }) & { runId?: string };
 export interface Api {
+  loadSession(): Promise<{ state: import('./session').SessionState; warning?: string }>;
+  saveView(view: import('./session').SessionView): Promise<void>;
+  flushView(view: import('./session').SessionView): { ok: boolean; error?: string };
   startEvaluation(): Promise<string>;
   stopEvaluation(id: string): Promise<void>;
   appInfo(): Promise<AppInfo>;

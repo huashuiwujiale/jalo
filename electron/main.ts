@@ -8,6 +8,8 @@ import { z } from 'zod';
 import { captureReferences, previewFile, searchFiles, listDirectory, rollbackPreview, restoreFile } from '../engine/project-files';
 import { createTwoFilesPatch } from 'diff';
 import { Store } from './store';
+import { SessionStore } from './session';
+import { viewSchema } from '../shared/session';
 import { EvaluationController } from './evaluation';
 import { DiagnosticLog, diagnosticReport, errorCategory, saveDiagnosticReport } from './diagnostics';
 import { LMStudioProvider } from '../engine/provider';
@@ -32,6 +34,8 @@ let win: BrowserWindow | undefined, store: Store;
 let tasks: Task[] = [];
 let active: { task: Task; worker: UtilityProcess; timer?: ReturnType<typeof setTimeout>; pids: Set<number> } | undefined;
 let modelOperation = false, quitting = false;
+let session: SessionStore;
+let closingProjectIds: string[] = [];
 let evaluation: EvaluationController;
 const configs = new Map<string, Settings>();
 const projectLocks = new Set<string>();
@@ -129,6 +133,21 @@ function register(channel: string, handler: (...args: any[]) => unknown) {
   });
 }
 function registerApi() {
+  const validateView = (raw: unknown) => {
+    const view = viewSchema.parse(raw);
+    const ids = quitting ? closingProjectIds : store.projects(true).map(p=>p.id);
+    if (view.projectId && !ids.includes(view.projectId)) throw new Error('草稿所属项目不存在');
+    if (view.taskId && !tasks.some(t=>t.id===view.taskId && t.projectId===view.projectId)) throw new Error('草稿所属任务与项目不匹配');
+    return view;
+  };
+  register('session:load', () => session.read());
+  register('session:save', (raw: unknown) => session.save(validateView(raw)));
+  ipcMain.on('session:flush', (event, raw: unknown) => {
+    try {
+      if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw new Error('无效的调用来源');
+      session.update(validateView(raw)); session.flush(); event.returnValue = { ok:true };
+    } catch { event.returnValue = { ok:false, error:'会话状态保存失败，请检查数据目录权限和磁盘空间' }; }
+  });
   register('evaluation:start', () => { idleRequired(); if (projectLocks.size) throw new Error('项目正在提交或回退，请稍后实测'); return evaluation.start(settings()); });
   register('evaluation:stop', (id: unknown) => evaluation.stop(uuid.parse(id)));
   register('app:snapshot', snapshot);
@@ -312,6 +331,7 @@ else {
   app.whenReady().then(async () => {
     diagnostics.record({ event: 'app_start' });
     store = await Store.open(path.join(app.getPath('userData'), 'local-code.sqlite'));
+    session = new SessionStore(path.join(app.getPath('userData'), 'ui-session.json'));
     evaluation = new EvaluationController(store, () => utilityProcess.fork(path.join(__dirname, 'worker.cjs'), [], { serviceName: 'Jalo Model Evaluation', stdio: 'pipe' }), broadcast, app.getVersion());
     tasks = store.tasks(); registerApi();
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Jalo', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }, { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }] }]));
@@ -321,6 +341,8 @@ else {
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', () => {
     if (quitting) return; quitting = true;
+    if(store)closingProjectIds = store.projects(true).map(p=>p.id);
+    try{session?.flush();}catch{diagnostics.record({event:'ipc_error',errorCategory:'permission'});}
     diagnostics.record({ event: 'app_quit' });
     evaluation?.shutdown();
     if (active) { clearTimeout(active.timer); killProcesses(active.pids); active.worker.kill(); }

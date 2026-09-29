@@ -5,6 +5,9 @@ const subscribe = (channel, fn) => {
   return () => ipcRenderer.removeListener(channel, listener);
 };
 contextBridge.exposeInMainWorld('localCode', Object.freeze({
+  loadSession: () => ipcRenderer.invoke('session:load'),
+  saveView: view => ipcRenderer.invoke('session:save', view),
+  flushView: view => ipcRenderer.sendSync('session:flush', view),
   startEvaluation: () => ipcRenderer.invoke('evaluation:start'),
   stopEvaluation: id => ipcRenderer.invoke('evaluation:stop', id),
   appInfo: () => ipcRenderer.invoke('app:info'),

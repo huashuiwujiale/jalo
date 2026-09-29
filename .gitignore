@@ -14,6 +14,7 @@ coverage/
 *.sqlite-*
 backups/
 recovery/
+ui-session.json*
 
 # Tooling caches and temporary files
 .vite/

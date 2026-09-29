@@ -8,11 +8,13 @@ import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { defaults } from '../shared/types';
 import { version, checkSyntax } from '../engine/syntax';
+import { emptyView, viewKey } from '../shared/session';
 const require = createRequire(import.meta.url);
 test('main IPC creates linked runs, persists checkpoints before acknowledgement, validates references and gates rollback', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(),'jalo-ipc-'));
   const root=path.join(home,'sample');await fs.mkdir(root);await fs.writeFile(path.join(root,'a.txt'),'old');
   const handlers = new Map<string,Function>(), workers:any[]=[]; let window:any, userData='', fatal:any;
+  const syncHandlers = new Map<string,Function>();
   let saveSelection: any = { canceled: true }, saveCalls = 0, openError = '', about: any;
   const opened: string[] = [];
   const app=new EventEmitter() as any;
@@ -21,6 +23,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     webContents:any; constructor(){super();window=this;this.webContents={mainFrame:{},send:()=>{},setWindowOpenHandler:()=>{},on:()=>{},session:{setPermissionRequestHandler:()=>{}}};} isDestroyed(){return false} async loadURL(){} }
   const fake = {app,BrowserWindow:Window,dialog:{showOpenDialog:async()=>({canceled:false,filePaths:[root]}),showErrorBox:(_t:string,m:string)=>fatal=m},ipcMain:{handle:(n:string,h:Function)=>handlers.set(n,h)},Menu:{setApplicationMenu:()=>{},buildFromTemplate:()=>[]},safeStorage:{isEncryptionAvailable:()=>true},utilityProcess:{fork:()=>{const w=new EventEmitter() as any;w.sent=[];w.postMessage=(m:any)=>w.sent.push(m);w.kill=()=>{};workers.push(w);setImmediate(()=>w.emit('spawn'));return w;}}};
   Object.assign(fake,{shell:{openPath:async (directory:string)=>{opened.push(directory);return openError;}}});
+  Object.assign(fake.ipcMain,{on:(name:string,handler:Function)=>syncHandlers.set(name,handler)});
   Object.assign(fake.dialog,{showSaveDialog:async()=>{saveCalls++;return saveSelection;}});
   const Module=require('node:module'), original=Module._load;
   Module._load=function(id:string,...args:any[]){if(id==='electron')return fake;return original.call(this,id,...args)};
@@ -50,6 +53,16 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const taskId=await invoke('task:submit',{projectId:project.id,prompt:'先计划',mode:'plan',references:[ref]});
     await assert.rejects(invoke('evaluation:start'),/请先停止/);
     const snapshot=()=>invoke('app:snapshot');
+    const draft={...emptyView(project.id,taskId),prompt:'尚未提交的草稿',references:[ref]};
+    await invoke('session:save',draft);
+    assert.equal((await invoke('session:load')).state.views[viewKey(project.id,taskId)].prompt,draft.prompt);
+    await assert.rejects(invoke('session:save',{...draft,projectId:randomUUID()}),/项目不存在/);
+    await assert.rejects(invoke('session:save',{...draft,taskId:randomUUID()}),/不匹配/);
+    await assert.rejects(invoke('session:save',{...draft,scroll:{...draft.scroll,top:-1}}));
+    const unauthorized:any={sender:{},senderFrame:{}};syncHandlers.get('session:flush')!(unauthorized,draft);assert.equal(unauthorized.returnValue.ok,false);
+    const closeEvent:any={sender:window.webContents,senderFrame:window.webContents.mainFrame};
+    syncHandlers.get('session:flush')!(closeEvent,{...draft,prompt:'关闭前最后输入'});assert.equal(closeEvent.returnValue.ok,true);
+    assert.equal(JSON.parse(await fs.readFile(path.join(userData,'ui-session.json'),'utf8')).views[viewKey(project.id,taskId)].prompt,'关闭前最后输入');
     let task=(await snapshot()).tasks.find((t:any)=>t.id===taskId), run=task.runs[0];assert.equal(run.mode,'plan');assert.equal(run.references[0].content,'old');
     await assert.rejects(invoke('task:archive',{taskId,archived:true}),/停止或完成/);
     await assert.rejects(invoke('project:remove',project.id),/先停止任务/);
