@@ -22,12 +22,17 @@ const session = new SessionStore(path.join(home, 'ui-session.json'));
 const p=randomUUID(),q=randomUUID(),t=randomUUID(),u=randomUUID();
 const makeTask=(id,projectId)=>({id,projectId,title:id===t?'任务 A':'任务 B',model:'mock',status:'completed',createdAt:1,messages:[],changes:[],events:Array.from({length:80},(_,i)=>({id:`event-${i}`,at:i,kind:'message',role:i%2?'assistant':'user',text:`样例记录 ${i}\n仅用于界面验证。`}))});
 const state={projects:[{id:p,name:'A',path:'/fixture/a'},{id:q,name:'B',path:'/fixture/b'}],tasks:[makeTask(t,p),makeTask(u,q)],settings:{...defaults,model:'mock'}};
+const markdownCode='  const text = "<tag> & data";\n'+'  // '+ 'long-code '.repeat(90)+'\n';
+const markdownText='# Markdown 验收\n\n**重点说明**和 `行内代码`。\n\n1. 读取\n2. 修改\n\n> 验收后再确认。\n\n```ts\n'+markdownCode+'```\n\n| 项目 | 状态 |\n| --- | --- |\n| 测试 | 通过 |\n\n- [x] 已完成\n\n[网页](https://example.com/docs) [禁止的链接](file:///etc/passwd)\n\n![图片](https://example.com/pixel)';
+state.tasks[0].events.find(event=>event.id==='event-46').text='# 用户原文\n**保持原样**';
+state.tasks[0].events.find(event=>event.id==='event-47').text=markdownText;
 for(const fixture of state.projects){fixture.path=path.join(home,fixture.name);fs.mkdirSync(fixture.path,{recursive:true});fs.writeFileSync(path.join(fixture.path,'a.txt'),'sample');}
 const fileContent=Array.from({length:739},(_,i)=>`line ${i+1}`).join('\n');
 for(const folder of ['first','second']){const dir=path.join(state.projects[0].path,'src',folder);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'index.vue'),fileContent);}
 fs.writeFileSync(path.join(state.projects[0].path,'binary.dat'),Buffer.from([0,1]));
 state.tasks[0].events.splice(5,0,{id:'tool-a',at:5,kind:'tool',toolCallId:'c',toolPhase:'call',text:'read_file {"path":"a.txt"}'});
-state.tasks[0].runs=[{id:randomUUID(),taskId:t,mode:'execute',input:'样例',createdAt:1,status:'completed',references:[],changes:[],checks:[],contextUsage:{inputTokens:5000,toolTokens:1000,outputReserve:1024,safetyReserve:3277,contextLength:16384,beforeTokens:14000,compactions:2}}];
+state.tasks[0].runs=[{id:randomUUID(),taskId:t,mode:'plan',input:'样例',createdAt:1,status:'completed',planText:markdownText,references:[],changes:[],checks:[],contextUsage:{inputTokens:5000,toolTokens:1000,outputReserve:1024,safetyReserve:3277,contextLength:16384,beforeTokens:14000,compactions:2}}];
+state.tasks[0].currentRunId=state.tasks[0].runs[0].id;
 const a={...emptyView(p,t),prompt:'草稿 A',references:[{projectId:p,path:'a.txt',startLine:1,endLine:2,version:'a'.repeat(64)}],scroll:{top:0,follow:false,anchor:'event-20',offset:0,expanded:['tool-a']}};
 session.update({...emptyView(q,u),prompt:'草稿 B'});session.update(a);session.flush();
 let win, server, failSubmit=true, finished=false, sequence=0;
@@ -36,6 +41,10 @@ const catalog=()=>({...state,sequence,tasks:state.tasks.map(task=>taskSummary(ta
 function sender(event){assert.equal(event.sender,win.webContents);assert.equal(event.senderFrame,win.webContents.mainFrame);}
 const fixture=id=>state.projects.find(p=>p.id===id);
 let delayReference=false;
+let failCopy=false, failLink=false;const copies=[],links=[];
+ipcMain.handle('app:copy-text',(event,text)=>{sender(event);if(failCopy)throw new Error('模拟复制失败');copies.push(text);});
+ipcMain.handle('app:open-link',(event,url)=>{sender(event);if(failLink)throw new Error('模拟打开失败');links.push(url);});
+ipcMain.handle('runs:plan',(event,input)=>{sender(event);return state.tasks.find(task=>task.id===input.taskId).runs.find(run=>run.id===input.runId).planText;});
 ipcMain.handle('files:search',(event,input)=>{sender(event);return projectFiles.searchFiles(fixture(input.projectId).path,input.query);});
 ipcMain.handle('files:list',(event,input)=>{sender(event);return projectFiles.listDirectory(fixture(input.projectId).path,input.path);});
 ipcMain.handle('files:preview',(event,input)=>{sender(event);return projectFiles.previewFile(fixture(input.projectId).path,input.path,input.startLine);});
@@ -66,7 +75,7 @@ const timeout=setTimeout(()=>finish(new Error('Session UI smoke timed out')),450
 async function finish(error){
   if(finished)return;finished=true;clearTimeout(timeout);
   win?.destroy();session.flush();await server?.close();fs.rmSync(home,{recursive:true,force:true});
-  if(error)console.error(error);else console.log('Session UI smoke passed: isolated drafts, references, scroll anchor, expanded cards, failed/successful submit and window restart');
+  if(error)console.error(error);else console.log('Session UI smoke passed: Markdown, code copy, links, saved plans, streaming, isolated drafts, references, scroll anchor, expanded cards, failed/successful submit and window restart');
   app.exit(error?1:0);
 }
 app.on('window-all-closed',()=>{});
@@ -75,6 +84,37 @@ app.whenReady().then(async()=>{
   server=await createServer({root:project,cacheDir:path.join(home,'vite-cache'),server:{host:'127.0.0.1',port:0}});await server.listen();
   const url=`http://127.0.0.1:${server.httpServer.address().port}`;await openWindow(url);
   await waitFor("document.querySelector('textarea').value==='草稿 A'");
+  const markdown="document.querySelector('[data-event-id=\"event-47\"]')";
+  assert.equal(await js(`${markdown}.querySelector('h1').textContent`),'Markdown 验收');
+  assert.equal(await js(`${markdown}.querySelector('pre code').textContent`),markdownCode);
+  assert.equal(await js(`${markdown}.querySelectorAll('table').length`),1);
+  assert.equal(await js(`${markdown}.querySelectorAll('img').length`),0);
+  assert.equal(await js(`${markdown}.querySelectorAll('a').length`),1);
+  assert.equal(await js("document.querySelector('[data-event-id=\"event-46\"] .message-text').textContent"),'# 用户原文\n**保持原样**');
+  assert.ok(await js(`${markdown}.querySelector('pre').scrollWidth > ${markdown}.querySelector('pre').clientWidth`));
+  assert.ok(await js(`${markdown}.getBoundingClientRect().right <= document.querySelector('.timeline').getBoundingClientRect().right`));
+  await js(`${markdown}.querySelector('button[aria-label=复制代码]').click()`);await waitFor(`${markdown}.textContent.includes('已复制')`);
+  assert.deepEqual(copies,[markdownCode]);
+  failCopy=true;await js(`${markdown}.querySelector('button[aria-label=复制代码]').click()`);await waitFor(`${markdown}.querySelector('[role=alert]')?.textContent.includes('复制失败')`);
+  failCopy=false;await js(`${markdown}.querySelector('button[aria-label=复制代码]').click()`);await waitFor(`!${markdown}.querySelector('[role=alert]')`);
+  await js(`${markdown}.querySelector('a').click()`);await waitFor(`${markdown}.querySelector('a')!==null`);await new Promise(r=>setTimeout(r,40));
+  assert.deepEqual(links,['https://example.com/docs']);assert.equal(await js('location.href'),url+'/');
+  failLink=true;await js(`${markdown}.querySelector('a').click()`);await waitFor(`${markdown}.querySelector('[role=alert]')?.textContent.includes('无法打开链接')`);failLink=false;
+  await js(`${markdown}.querySelector('a').click()`);await waitFor(`!${markdown}.querySelector('[role=alert]')`);
+  await js("document.querySelector('.saved-plan summary').click()");await waitFor("document.querySelector('.saved-plan h1')?.textContent==='Markdown 验收'");
+  assert.equal(await js("document.querySelector('.saved-plan pre code').textContent"),markdownCode);
+  await js("document.querySelector('.saved-plan summary').click()");
+  const runId=state.tasks[0].currentRunId, streaming='## 流式回复\n\n```ts\nconst text = "正在生成";';
+  win.webContents.send('task:delta',{kind:'reset',taskId:t,runId,version:1,text:''});
+  win.webContents.send('task:delta',{kind:'append',taskId:t,runId,version:2,offset:0,text:streaming});
+  await waitFor("document.querySelector('.streaming-reply h2')?.textContent==='流式回复'");
+  assert.match(await js("document.querySelector('.streaming-reply code').textContent"),/正在生成/);
+  win.webContents.send('task:delta',{kind:'append',taskId:t,runId,version:3,offset:streaming.length,text:'\n```\n\n**生成完成**'});
+  await waitFor("document.querySelector('.streaming-reply .markdown-body strong')?.textContent==='生成完成'");
+  win.webContents.send('task:delta',{kind:'end',taskId:t,runId,version:4,text:''});await waitFor("!document.querySelector('.streaming-reply')");
+  if(process.env.JALO_MARKDOWN_SCREENSHOT){await js(`${markdown}.scrollIntoView({block:'center'})`);await new Promise(r=>setTimeout(r,80));fs.writeFileSync(process.env.JALO_MARKDOWN_SCREENSHOT,(await win.webContents.capturePage()).toPNG());}
+  await js("(()=>{const pane=document.querySelector('.conversation'),node=pane.querySelector('[data-event-id=\"event-20\"]');pane.scrollTop+=node.getBoundingClientRect().top-pane.getBoundingClientRect().top;})()");
+  await new Promise(r=>setTimeout(r,80));
   assert.match(await js("document.querySelector('.context-usage').textContent"),/本轮压缩 2 次/);
   await js("document.querySelector('.context-usage summary').click()");
   assert.equal(await js("document.querySelector('.context-usage progress').max"),16384);

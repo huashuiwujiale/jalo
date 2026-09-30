@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('localCode', Object.freeze({
   appInfo: () => ipcRenderer.invoke('app:info'),
   openDataDirectory: () => ipcRenderer.invoke('app:open-data'),
   exportDiagnostics: () => ipcRenderer.invoke('app:export-diagnostics'),
+  openLink: url => ipcRenderer.invoke('app:open-link', url),
+  copyText: text => ipcRenderer.invoke('app:copy-text', text),
   snapshot: () => ipcRenderer.invoke('app:snapshot'),
   addProject: () => ipcRenderer.invoke('project:add'),
   removeProject: projectId => ipcRenderer.invoke('project:remove', projectId),

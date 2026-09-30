@@ -155,6 +155,9 @@ test('preload exposes on-demand requests and removes streaming listeners without
   vm.runInNewContext(fs.readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8'), { require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: any) => api = value }, ipcRenderer: renderer }) });
   await api.taskDetail('task'); await api.planText('task', 'run'); await api.changePatch({ taskId: 'task', path: 'a.txt' }); await api.searchTasks({ projectId: 'project', archived: false, query: 'old' });
   assert.deepEqual(invoked.map(args => args[0]), ['task:detail', 'runs:plan', 'changes:patch', 'tasks:search']);
+  await api.openLink('https://example.com'); await api.copyText('  code\n');
+  assert.deepEqual(Array.from(invoked.at(-2)!), ['app:open-link', 'https://example.com']);
+  assert.deepEqual(Array.from(invoked.at(-1)!), ['app:copy-text', '  code\n']);
   let received: unknown; const off = api.onDelta((value: unknown) => received = value), value = { taskId: 'task', text: 'chunk' };
   listeners.get('task:delta')!({ privileged: true }, value); assert.equal(received, value); off(); assert.ok(!listeners.has('task:delta'));
 });

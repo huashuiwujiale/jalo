@@ -18,7 +18,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
   const handlers = new Map<string,Function>(), workers:any[]=[]; let window:any, userData='', fatal:any;
   const syncHandlers = new Map<string,Function>();
   let saveSelection: any = { canceled: true }, saveCalls = 0, openError = '', about: any;
-  const opened: string[] = [], deliveries: { channel: string; value: any }[] = [];
+  const opened: string[] = [], externalLinks: string[] = [], copied: string[] = [], deliveries: { channel: string; value: any }[] = [];
   const originalFlush = Store.prototype.flush;
   let flushes = 0, failWrites = false;
   Store.prototype.flush = function () {
@@ -33,7 +33,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
   class Window extends EventEmitter {
     webContents:any; constructor(){super();window=this;this.webContents={mainFrame:{},send:(channel:string,value:any)=>deliveries.push({channel,value:structuredClone(value)}),setWindowOpenHandler:()=>{},on:()=>{},session:{setPermissionRequestHandler:()=>{}}};} isDestroyed(){return false} async loadURL(){} }
   const fake = {app,BrowserWindow:Window,dialog:{showOpenDialog:async()=>({canceled:false,filePaths:[root]}),showErrorBox:(_t:string,m:string)=>fatal=m},ipcMain:{handle:(n:string,h:Function)=>handlers.set(n,h)},Menu:{setApplicationMenu:()=>{},buildFromTemplate:()=>[]},safeStorage:{isEncryptionAvailable:()=>true},utilityProcess:{fork:()=>{const w=new EventEmitter() as any;w.sent=[];w.postMessage=(m:any)=>w.sent.push(m);w.kill=()=>{w.killed=true;};workers.push(w);setImmediate(()=>w.emit('spawn'));return w;}}};
-  Object.assign(fake,{shell:{openPath:async (directory:string)=>{opened.push(directory);return openError;}}});
+  Object.assign(fake,{shell:{openPath:async (directory:string)=>{opened.push(directory);return openError;},openExternal:async (url:string)=>{externalLinks.push(url);}},clipboard:{writeText:(text:string)=>copied.push(text)}});
   Object.assign(fake.ipcMain,{on:(name:string,handler:Function)=>syncHandlers.set(name,handler)});
   Object.assign(fake.dialog,{showSaveDialog:async()=>{saveCalls++;return saveSelection;}});
   const Module=require('node:module'), original=Module._load;
@@ -51,6 +51,14 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal(info.packaged,false);assert.equal(info.dataDirectory,userData);assert.equal(info.logDirectory,path.join(userData,'logs'));
     await invoke('app:open-data','/unexpected');assert.deepEqual(opened,[userData]);
     openError='OS refused';await assert.rejects(invoke('app:open-data'),/无法打开/);openError='';
+    await invoke('app:open-link','https://example.com/docs');assert.deepEqual(externalLinks,['https://example.com/docs']);
+    for(const url of ['javascript:alert(1)','file:///etc/passwd','vscode://open','//example.com','https://user:password@example.com','https://example.com\n'])await assert.rejects(invoke('app:open-link',url),/HTTP\/HTTPS/);
+    await assert.rejects(invoke('app:open-link','https://example.com/'+'x'.repeat(8192)));
+    await assert.rejects(handlers.get('app:open-link')!({sender:{},senderFrame:{}},'https://example.com'),/无效的调用来源/);
+    assert.equal(externalLinks.length,1);
+    const code='  echo "<data>"\n';await invoke('app:copy-text',code);assert.deepEqual(copied,[code]);
+    await assert.rejects(invoke('app:copy-text',{text:code}));await assert.rejects(invoke('app:copy-text','x'.repeat(1000001)));
+    await assert.rejects(handlers.get('app:copy-text')!({sender:{},senderFrame:{}},code),/无效的调用来源/);assert.equal(copied.length,1);
     assert.equal(await invoke('app:export-diagnostics'),null);
     saveSelection={canceled:false,filePath:path.join(userData,'local-code.sqlite')};
     await assert.rejects(invoke('app:export-diagnostics'),/数据目录之外/);

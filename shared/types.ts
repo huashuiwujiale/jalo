@@ -78,6 +78,8 @@ export interface Api {
   appInfo(): Promise<AppInfo>;
   openDataDirectory(): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
+  openLink(url: string): Promise<void>;
+  copyText(text: string): Promise<void>;
   snapshot(): Promise<Snapshot>;
   addProject(): Promise<Project | null>;
   removeProject(projectId: string): Promise<void>;

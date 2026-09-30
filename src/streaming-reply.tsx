@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Code2, LoaderCircle } from 'lucide-react';
 import type { Api, StreamFrame, StreamState } from '../shared/types';
+import { Markdown } from './markdown';
 
 export class StreamAccumulator {
   state: StreamState;
@@ -40,5 +41,5 @@ export const StreamingReply = React.memo(function StreamingReply({ api, taskId, 
   useEffect(() => { if (accumulator.current.seed(initial)) setState(accumulator.current.state); }, [initial]);
   useLayoutEffect(() => { onChange.current(); }, [state.text, state.ended]);
   if (state.ended || !state.text) return null;
-  return <article className="message assistant streaming-reply"><div className="message-author"><span className="avatar assistant-avatar"><Code2 size={15}/></span><strong>Jalo</strong><LoaderCircle className="spin" size={13}/></div><div className="message-text">{state.text}<span className="cursor"/></div></article>;
+  return <article className="message assistant streaming-reply"><div className="message-author"><span className="avatar assistant-avatar"><Code2 size={15}/></span><strong>Jalo</strong><LoaderCircle className="spin" size={13}/></div><div className="message-text"><Markdown text={state.text}/><span className="cursor"/></div></article>;
 });

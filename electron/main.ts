@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, shell, utilityProcess, type UtilityProcess } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, shell, utilityProcess, type UtilityProcess } from 'electron';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -18,6 +18,7 @@ import { linkedPlanContext, pageTaskEvents } from '../shared/task-history';
 import { changeView, searchTaskIds, taskDetail, taskSummary } from '../shared/task-wire';
 import { ReplyStream, UpdateBatch } from './ipc-updates';
 import { fileNameIndex } from '../engine/file-search';
+import { webLink } from '../shared/markdown';
 import { busyStatuses, type AppInfo, type EngineEvent, type Settings, type Snapshot, type Task, type Run, type Progress, type TaskSummary } from '../shared/types';
 
 // Keep legacy identity when upgrading: macOS safeStorage keys also depend on the app name.
@@ -200,6 +201,12 @@ function registerApi() {
   register('evaluation:stop', (id: unknown) => evaluation.stop(uuid.parse(id)));
   register('app:snapshot', snapshot);
   register('app:info', appInfo);
+  register('app:open-link', async (raw: unknown) => {
+    const url = webLink(z.string().max(8192).parse(raw));
+    if (!url) throw new Error('仅支持不含账号密码的 HTTP/HTTPS 网页链接');
+    await shell.openExternal(url);
+  });
+  register('app:copy-text', (raw: unknown) => clipboard.writeText(z.string().max(1000000).parse(raw)));
   register('app:open-data', async () => {
     const error = await shell.openPath(app.getPath('userData'));
     if (error) throw new Error('无法打开数据目录，请复制设置中显示的路径，在 Finder 中前往该文件夹');
