@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Api, Event, Task } from '../shared/types';
+type HistoryTask = Pick<Task, 'id' | 'events' | 'eventCount'>;
 
 /** Retain loaded pages while recent snapshots advance, and ignore stale requests. */
 export class EventHistory {
@@ -8,17 +9,23 @@ export class EventHistory {
   total = 0;
   loading = false;
   private generation = 0;
-  private get entries() { return [...this.cached.entries()].sort(([a], [b]) => a - b); }
-  get events() { return this.entries.map(([, event]) => event); }
+  private rendered?: Event[];
+  private ordered?: [number, Event][];
+  private get entries() { return this.ordered ??= [...this.cached.entries()].sort(([a], [b]) => a - b); }
+  get events() { return this.rendered ??= this.entries.map(([, event]) => event); }
   get hasMore() { return this.cached.size < this.total; }
   get hasGap() { const entries = this.entries; return entries.some(([index], i) => i > 0 && index !== entries[i - 1][0] + 1); }
-  update(task?: Task) {
+  private insert(index: number, event: Event) {
+    if (this.cached.get(index)?.id === event.id) return;
+    this.cached.set(index, event); this.rendered = undefined; this.ordered = undefined;
+  }
+  update(task?: HistoryTask) {
     if (this.taskId !== (task?.id || '')) {
-      this.generation++; this.taskId = task?.id || ''; this.cached.clear(); this.loading = false;
+      this.generation++; this.taskId = task?.id || ''; this.cached.clear(); this.rendered = undefined; this.ordered = undefined; this.loading = false;
     }
     this.total = task?.eventCount ?? task?.events.length ?? 0;
     const recent = task?.events || [], start = this.total - recent.length;
-    recent.forEach((event, i) => this.cached.set(start + i, event));
+    recent.forEach((event, i) => this.insert(start + i, event));
   }
   async loadEarlier(api: Pick<Api, 'taskEvents'>, beforeApply: () => void = () => {}) {
     if (this.loading || !this.hasMore || !this.cached.size) return false;
@@ -32,7 +39,7 @@ export class EventHistory {
       if (generation !== this.generation) return false;
       if (!page.events.length || !Number.isInteger(page.start) || page.start < 0) throw new Error('历史记录分页未返回有效内容，请重新打开任务');
       beforeApply();
-      page.events.forEach((event, i) => this.cached.set(page.start + i, event));
+      page.events.forEach((event, i) => this.insert(page.start + i, event));
       this.total = Math.max(this.total, page.total);
       return true;
     } catch (error) {
@@ -42,7 +49,7 @@ export class EventHistory {
   }
 }
 
-export function useEventHistory(task: Task | undefined, api: Api, anchor: string | undefined, beforeApply: () => void, fail: (error: unknown) => void) {
+export function useEventHistory(task: HistoryTask | undefined, api: Api, anchor: string | undefined, beforeApply: () => void, fail: (error: unknown) => void) {
   const history = useRef(new EventHistory());
   const [, refresh] = useState(0);
   const [failedTask, setFailedTask] = useState('');

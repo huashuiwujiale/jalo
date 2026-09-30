@@ -2,7 +2,7 @@ import React from 'react';
 import { ChevronDown, Terminal } from 'lucide-react';
 import type { ToolGroup } from './tool-events';
 const labels: Record<string, string> = { read_file: '读取文件', list_directory: '浏览目录', search_files: '搜索文件', write_file: '写入文件', edit_file: '修改文件', replace_lines: '替换代码行', find_vue_elements: '定位 Vue 元素', edit_vue_element: '修改 Vue 元素', run_command: '执行命令', show_changes: '查看差异' };
-export function ToolCard({ group, active, waiting }: { group: ToolGroup; active: boolean; waiting: boolean }) {
+export const ToolCard = React.memo(function ToolCard({ group, active, waiting }: { group: ToolGroup; active: boolean; waiting: boolean }) {
   const argsText = group.call.text.slice(group.name.length).trim();
   let target = '', parameters = argsText;
   try { const args = JSON.parse(argsText); target = args.path || args.command || args.query || ''; parameters = JSON.stringify(args, null, 2); } catch {}
@@ -21,4 +21,4 @@ export function ToolCard({ group, active, waiting }: { group: ToolGroup; active:
       {!group.result && <p>{active ? '等待工具返回结果…' : '此次调用没有完整结果记录，不能据此确认执行成功。'}</p>}
     </div>
   </details>;
-}
+}, (a, b) => a.active === b.active && a.waiting === b.waiting && a.group.call === b.group.call && a.group.result === b.group.result && a.group.errors.length === b.group.errors.length && a.group.errors.every((error, index) => error === b.group.errors[index]));

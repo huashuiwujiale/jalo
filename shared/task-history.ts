@@ -32,11 +32,11 @@ export function linkedPlanContext(plan: Run, files: string[]): string {
   if (plan.mode !== 'plan' || plan.status !== 'completed' || !plan.planText?.trim()) throw new Error('该计划缺少完整保存的正文，请重新生成计划后执行');
   return '\n用户已确认进入新的执行轮次。之前计划模式的只读限制和拒绝结果不适用于本轮；当前允许项目内文件写入。原始目标要求：' + plan.input + '\n以下为关联计划，重新读取相关文件，不沿用旧行号：\n' + plan.planText + '\n已重新确认的引用文件：' + files.join('、');
 }
-export function filterTasks(tasks: Task[], projectId: string, archived: boolean, query: string) {
+export function filterTasks<T extends Pick<Task, 'projectId' | 'archivedAt' | 'title' | 'userRequests'> & Partial<Pick<Task, 'runs' | 'events'>>>(tasks: T[], projectId: string, archived: boolean, query: string) {
   const term = query.trim().toLocaleLowerCase();
   return tasks.filter(t => t.projectId === projectId && !!t.archivedAt === archived && (!term ||
     t.title.toLocaleLowerCase().includes(term) ||
     t.userRequests?.some(text => text.toLocaleLowerCase().includes(term)) ||
     t.runs?.some(r => r.input.toLocaleLowerCase().includes(term)) ||
-    t.events.some(e => e.role === 'user' && e.text.toLocaleLowerCase().includes(term))));
+    t.events?.some(e => e.role === 'user' && e.text.toLocaleLowerCase().includes(term))));
 }

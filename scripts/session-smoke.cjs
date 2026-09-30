@@ -13,6 +13,8 @@ load('tsx/cjs');
 const { SessionStore } = load('./electron/session.ts');
 const { emptyView, viewSchema } = load('./shared/session.ts');
 const { defaults } = load('./shared/types.ts');
+const { taskSummary, taskDetail } = load('./shared/task-wire.ts');
+const { filterTasks, pageTaskEvents } = load('./shared/task-history.ts');
 const projectFiles = load('./engine/project-files.ts');
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'jalo-session-ui-'));
 app.setPath('userData', path.join(home, 'profile'));
@@ -28,7 +30,9 @@ state.tasks[0].events.splice(5,0,{id:'tool-a',at:5,kind:'tool',toolCallId:'c',to
 state.tasks[0].runs=[{id:randomUUID(),taskId:t,mode:'execute',input:'样例',createdAt:1,status:'completed',references:[],changes:[],checks:[],contextUsage:{inputTokens:5000,toolTokens:1000,outputReserve:1024,safetyReserve:3277,contextLength:16384,beforeTokens:14000,compactions:2}}];
 const a={...emptyView(p,t),prompt:'草稿 A',references:[{projectId:p,path:'a.txt',startLine:1,endLine:2,version:'a'.repeat(64)}],scroll:{top:0,follow:false,anchor:'event-20',offset:0,expanded:['tool-a']}};
 session.update({...emptyView(q,u),prompt:'草稿 B'});session.update(a);session.flush();
-let win, server, failSubmit=true, finished=false;
+let win, server, failSubmit=true, finished=false, sequence=0;
+const revisions=new Map();
+const catalog=()=>({...state,sequence,tasks:state.tasks.map(task=>taskSummary(task,revisions.get(task.id)||0))});
 function sender(event){assert.equal(event.sender,win.webContents);assert.equal(event.senderFrame,win.webContents.mainFrame);}
 const fixture=id=>state.projects.find(p=>p.id===id);
 let delayReference=false;
@@ -36,14 +40,18 @@ ipcMain.handle('files:search',(event,input)=>{sender(event);return projectFiles.
 ipcMain.handle('files:list',(event,input)=>{sender(event);return projectFiles.listDirectory(fixture(input.projectId).path,input.path);});
 ipcMain.handle('files:preview',(event,input)=>{sender(event);return projectFiles.previewFile(fixture(input.projectId).path,input.path,input.startLine);});
 ipcMain.handle('files:reference',async(event,input)=>{sender(event);if(delayReference)await new Promise(r=>setTimeout(r,400));return projectFiles.referenceFile(fixture(input.projectId),input.path);});
-ipcMain.handle('app:snapshot',event=>{sender(event);return state;});
+ipcMain.handle('app:snapshot',event=>{sender(event);return catalog();});
+ipcMain.handle('task:detail',(event,id)=>{sender(event);return taskDetail(state.tasks.find(task=>task.id===id),revisions.get(id)||0);});
+ipcMain.handle('task:events',(event,input)=>{sender(event);return pageTaskEvents(state.tasks.find(task=>task.id===input.taskId),input.before);});
+ipcMain.handle('tasks:search',(event,input)=>{sender(event);return filterTasks(state.tasks,input.projectId,input.archived,input.query).map(task=>task.id);});
 ipcMain.handle('session:load',event=>{sender(event);return session.read();});
 ipcMain.handle('session:save',(event,view)=>{sender(event);return session.save(viewSchema.parse(view));});
 ipcMain.on('session:flush',(event,view)=>{try{sender(event);session.update(viewSchema.parse(view));session.flush();event.returnValue={ok:true};}catch(error){event.returnValue={ok:false,error:error.message};}});
 ipcMain.handle('task:submit',(event,input)=>{
   sender(event);if(failSubmit)throw new Error('模拟提交失败');
   const id=input.taskId||randomUUID();if(!input.taskId)state.tasks.unshift({...makeTask(id,input.projectId),title:'新任务'});
-  win.webContents.send('app:update',state);return id;
+  revisions.set(id,(revisions.get(id)||0)+1);sequence++;
+  win.webContents.send('app:update',{sequence,tasks:[taskSummary(state.tasks.find(task=>task.id===id),revisions.get(id))]});return id;
 });
 const js=code=>win.webContents.executeJavaScript(code);
 async function waitFor(condition){await js(`(async()=>{for(let i=0;i<400;i++){if(${condition})return;await new Promise(r=>setTimeout(r,25));}throw Error('界面条件未满足：'+${JSON.stringify(condition)});})()`);}
@@ -52,7 +60,7 @@ const key=name=>js(`document.querySelector('textarea').dispatchEvent(new Keyboar
 const anchorOffset=()=>js(`(()=>{const pane=document.querySelector('.conversation'),node=pane.querySelector('[data-event-id="event-20"]');return node.getBoundingClientRect().top-pane.getBoundingClientRect().top;})()`);
 async function openWindow(url){
   win=new BrowserWindow({show:false,width:1440,height:940,webPreferences:{preload:path.join(project,'electron/preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false}});
-  await win.loadURL(url);await waitFor("document.querySelector('textarea')");
+  await win.loadURL(url);await waitFor("document.querySelector('textarea') && document.querySelector('[data-event-id=\"event-20\"]')");
 }
 const timeout=setTimeout(()=>finish(new Error('Session UI smoke timed out')),45000);
 async function finish(error){

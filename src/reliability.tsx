@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { Api, FilePage, FileReference, Project, Task, Run, RollbackPreview } from '../shared/types';
+import type { Api, FilePage, FileReference, Project, TaskDetail, Run, RunView, RollbackPreview } from '../shared/types';
 import { busyStatuses } from '../shared/types';
+import { hasChange } from '../shared/progress';
+import { useRemoteResource } from './remote-resource';
 import { FileTree } from './file-tree';
 const api: Api = window.localCode;
 export const modeLabels = { execute: '执行', plan: '计划', review: '审查' };
@@ -33,8 +35,8 @@ export function FilePicker({ project, initialPath, initialReference, close, choo
     </footer>
   </section></div>;
 }
-export function RunResult({ run }: { run: Run }) {
-  const written = run.changes.filter(c => c.state === 'written' && c.before !== c.after);
+export function RunResult({ run }: { run: Run | RunView }) {
+  const written = run.changes.filter(c => c.state === 'written' && hasChange(c));
   const restored = run.changes.filter(c => c.state === 'reverted');
   const uncertain = run.changes.filter(c => c.state === 'prepared' || c.state === 'uncertain');
   const checks = run.checks.reduce((r, c) => ({ ...r, [c.status]: r[c.status] + 1 }), { passed: 0, failed: 0, skipped: 0 });
@@ -45,16 +47,23 @@ export function RunResult({ run }: { run: Run }) {
     {!!written.length && <small>待人工确认：差异是否符合要求、页面行为及项目测试。语法检查不代表业务验收；未运行编译或打包。</small>}
   </section>;
 }
-export function RunPanel({ task, runId, selectRun, locked, fail, preview }: { task?: Task; runId: string; selectRun: (id: string) => void; locked: boolean; fail: (e: unknown) => void; preview: (path: string) => void }) {
+export function RunPanel({ task, runId, selectRun, locked, fail, preview }: { task?: TaskDetail; runId: string; selectRun: (id: string) => void; locked: boolean; fail: (e: unknown) => void; preview: (path: string) => void }) {
   const [scope, setScope] = useState<'run' | 'task'>('run'), [file, setFile] = useState('');
   const [rollback, setRollback] = useState<RollbackPreview>(), [working, setWorking] = useState(false);
   const run = task?.runs?.find(r => r.id === runId) || task?.runs?.at(-1);
-  const changes = scope === 'run' ? run?.changes.filter(c => c.state === 'written' && c.before !== c.after) || [] : task?.changes || [];
+  const changes = scope === 'run' ? run?.changes.filter(c => c.state === 'written' && c.changed) || [] : task?.changes || [];
   const change = changes.find(c => c.path === file) || changes[0];
+  const patchKey = task && change ? `${task.id}:${scope}:${scope === 'run' ? run?.id : ''}:${change.path}:${change.patchVersion}` : '';
+  const patch = useRemoteResource(patchKey, async () => {
+    const value = await api.changePatch({ taskId: task!.id, ...(scope === 'run' ? { runId: run!.id } : {}), path: change!.path });
+    if (value.version !== change!.patchVersion) throw new Error('差异已更新，请重新选择文件');
+    return value.patch;
+  });
   useEffect(() => { setFile(''); setScope('run'); setRollback(undefined); }, [task?.id]);
   return <><div className="run-controls"><select aria-label="差异范围" value={scope} onChange={e => setScope(e.target.value as 'run' | 'task')}><option value="run">本轮修改</option><option value="task">整个任务修改</option></select><select aria-label="选择轮次" value={run?.id || ''} onChange={e => { selectRun(e.target.value); setFile(''); }} disabled={!task?.runs?.length}><option value="" disabled>无轮次记录</option>{task?.runs?.map((r, i) => <option key={r.id} value={r.id}>第 {i + 1} 轮 · {modeLabels[r.mode]} · {r.input.slice(0, 20)}</option>)}</select></div>
     {task?.legacy && <p className="inspector-note">历史数据，缺少轮次核验；旧改动不提供回退。</p>}
-    {change ? <><div className="file-list">{changes.map(c => <button key={c.path} className={change.path === c.path ? 'active' : ''} onClick={() => setFile(c.path)}>{c.path}</button>)}</div><div className="diff-title">{change.path}<button onClick={() => preview(change.path)}>查看当前原文</button></div><pre className="diff">{change.patch.split('\n').map((line, i) => <div key={i} className={line.startsWith('+') ? 'addition' : line.startsWith('-') ? 'deletion' : line.startsWith('@@') ? 'hunk' : ''}>{line || ' '}</div>)}</pre>
+    {change ? <><div className="file-list">{changes.map(c => <button key={c.path} className={change.path === c.path ? 'active' : ''} onClick={() => setFile(c.path)}>{c.path}</button>)}</div><div className="diff-title">{change.path}<button onClick={() => preview(change.path)}>查看当前原文</button></div><pre className="diff">{(patch.value ?? patch.error ?? '正在加载差异…').split('\n').map((line, i) => <div key={i} className={line.startsWith('+') ? 'addition' : line.startsWith('-') ? 'deletion' : line.startsWith('@@') ? 'hunk' : ''}>{line || ' '}</div>)}</pre>
+      {patch.error && <button onClick={patch.retry}>重新加载差异</button>}
       {scope === 'run' && run && <button className="rollback-button" disabled={locked || working || !('state' in change) || change.state !== 'written'} onClick={async () => { setWorking(true); try { setRollback(await api.previewRollback(task!.id, run.id, change.path)); } catch (e) { fail(e); } finally { setWorking(false); } }}>预览回退此文件</button>}
     </> : <div className="inspector-empty"><h3>{run?.changes.some(c => c.state === 'reverted') ? '本轮修改已回退' : '暂无实际修改'}</h3><p>只有文件工具的真实写入会显示在这里。</p></div>}
     {run && <RunResult run={run}/>}

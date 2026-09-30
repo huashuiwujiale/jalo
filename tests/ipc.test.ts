@@ -10,6 +10,7 @@ import { defaults } from '../shared/types';
 import { version, checkSyntax } from '../engine/syntax';
 import { emptyView, viewKey } from '../shared/session';
 import { Store, taskSaveDelay } from '../electron/store';
+import { streamDelay } from '../electron/ipc-updates';
 const require = createRequire(import.meta.url);
 test('main IPC creates linked runs, persists checkpoints before acknowledgement, validates references and gates rollback', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(),'jalo-ipc-'));
@@ -17,7 +18,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
   const handlers = new Map<string,Function>(), workers:any[]=[]; let window:any, userData='', fatal:any;
   const syncHandlers = new Map<string,Function>();
   let saveSelection: any = { canceled: true }, saveCalls = 0, openError = '', about: any;
-  const opened: string[] = [];
+  const opened: string[] = [], deliveries: { channel: string; value: any }[] = [];
   const originalFlush = Store.prototype.flush;
   let flushes = 0, failWrites = false;
   Store.prototype.flush = function () {
@@ -30,7 +31,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
   const app=new EventEmitter() as any;
   Object.assign(app,{getVersion:()=> '9.8.7',isPackaged:false,getPath:(key:string)=>key==='userData'?userData:home,setPath:(_k:string,v:string)=>userData=v,setName:()=>{},setAboutPanelOptions:(value:any)=>about=value,requestSingleInstanceLock:()=>true,whenReady:()=>Promise.resolve(),quit:()=>{}});
   class Window extends EventEmitter {
-    webContents:any; constructor(){super();window=this;this.webContents={mainFrame:{},send:()=>{},setWindowOpenHandler:()=>{},on:()=>{},session:{setPermissionRequestHandler:()=>{}}};} isDestroyed(){return false} async loadURL(){} }
+    webContents:any; constructor(){super();window=this;this.webContents={mainFrame:{},send:(channel:string,value:any)=>deliveries.push({channel,value:structuredClone(value)}),setWindowOpenHandler:()=>{},on:()=>{},session:{setPermissionRequestHandler:()=>{}}};} isDestroyed(){return false} async loadURL(){} }
   const fake = {app,BrowserWindow:Window,dialog:{showOpenDialog:async()=>({canceled:false,filePaths:[root]}),showErrorBox:(_t:string,m:string)=>fatal=m},ipcMain:{handle:(n:string,h:Function)=>handlers.set(n,h)},Menu:{setApplicationMenu:()=>{},buildFromTemplate:()=>[]},safeStorage:{isEncryptionAvailable:()=>true},utilityProcess:{fork:()=>{const w=new EventEmitter() as any;w.sent=[];w.postMessage=(m:any)=>w.sent.push(m);w.kill=()=>{w.killed=true;};workers.push(w);setImmediate(()=>w.emit('spawn'));return w;}}};
   Object.assign(fake,{shell:{openPath:async (directory:string)=>{opened.push(directory);return openError;}}});
   Object.assign(fake.ipcMain,{on:(name:string,handler:Function)=>syncHandlers.set(name,handler)});
@@ -67,7 +68,11 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await assert.rejects(invoke('task:submit',{projectId:project.id,prompt:'x',references:[{...ref,projectId:randomUUID()}]}),/其他项目/);
     const taskId=await invoke('task:submit',{projectId:project.id,prompt:'先计划',mode:'plan',references:[ref]});
     await assert.rejects(invoke('evaluation:start'),/请先停止/);
-    const snapshot=()=>invoke('app:snapshot');
+    const snapshot=async()=>{ const summary=await invoke('app:snapshot'); return {...summary,tasks:await Promise.all(summary.tasks.map((task:any)=>invoke('task:detail',task.id)))}; };
+    const catalog=await invoke('app:snapshot');
+    assert.ok(!('messages' in catalog.tasks[0]));assert.ok(!('events' in catalog.tasks[0]));assert.ok(!('runs' in catalog.tasks[0]));assert.ok(!('changes' in catalog.tasks[0]));
+    await assert.rejects(invoke('task:detail',randomUUID()),/任务不存在/);
+    await assert.rejects(handlers.get('task:detail')!({sender:{},senderFrame:{}},taskId),/无效的调用来源/);
     const draft={...emptyView(project.id,taskId),prompt:'尚未提交的草稿',references:[ref]};
     await invoke('session:save',draft);
     assert.equal((await invoke('session:load')).state.views[viewKey(project.id,taskId)].prompt,draft.prompt);
@@ -78,7 +83,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const closeEvent:any={sender:window.webContents,senderFrame:window.webContents.mainFrame};
     syncHandlers.get('session:flush')!(closeEvent,{...draft,prompt:'关闭前最后输入'});assert.equal(closeEvent.returnValue.ok,true);
     assert.equal(JSON.parse(await fs.readFile(path.join(userData,'ui-session.json'),'utf8')).views[viewKey(project.id,taskId)].prompt,'关闭前最后输入');
-    let task=(await snapshot()).tasks.find((t:any)=>t.id===taskId), run=task.runs[0];assert.equal(run.mode,'plan');assert.equal(run.references[0].content,'old');
+    let task=(await snapshot()).tasks.find((t:any)=>t.id===taskId), run=task.runs[0];assert.equal(run.mode,'plan');assert.ok(!('content' in run.references[0]));assert.ok(!('messages' in task));
     await assert.rejects(invoke('task:archive',{taskId,archived:true}),/停止或完成/);
     await assert.rejects(invoke('project:remove',project.id),/先停止任务/);
     await assert.rejects(invoke('task:rename',{taskId,title:'   '}));
@@ -91,6 +96,13 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'preparing');
     worker.emit('message',{type:'progress',runId:run.id,progress:{phase:'waiting_model',since:Date.now(),step:1,maxSteps:30}});
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'waiting_model');
+    const beforeDeltas=deliveries.filter(delivery=>delivery.channel==='task:delta').length;
+    for(let i=0;i<1000;i++)worker.emit('message',{type:'delta',runId:run.id,text:'流'});
+    assert.equal(deliveries.filter(delivery=>delivery.channel==='task:delta').length,beforeDeltas);
+    const activeStream=(await invoke('task:detail',taskId)).stream;assert.equal(activeStream.text,'流'.repeat(1000));
+    await new Promise(resolve=>setTimeout(resolve,streamDelay+10));
+    const streamed=deliveries.filter(delivery=>delivery.channel==='task:delta');assert.equal(streamed.length,beforeDeltas+1);
+    assert.equal(streamed.at(-1)!.value.text,'流'.repeat(1000));assert.equal(streamed.at(-1)!.value.runId,run.id);
     const usage={inputTokens:5000,toolTokens:1200,outputReserve:1024,safetyReserve:3277,contextLength:16384,beforeTokens:9000,compactions:1};
     worker.emit('message',{type:'context',runId:'other-run',usage});
     assert.equal((await snapshot()).tasks[0].runs[0].contextUsage,undefined);
@@ -109,12 +121,18 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'tool');
     const savedPlan='开头的完整约束\n'+'计划内容。'.repeat(3000)+'\n读取 a.txt，再将 old 改为 new，重新读取验收。';
     const beforeEvents = flushes;
+    const beforeUpdates=deliveries.filter(delivery=>delivery.channel==='app:update').length;
     worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'message',role:'assistant',text:'临时思路，不应成为执行计划'}});
     for(let i=0;i<605;i++)worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'notice',text:`历史记录 ${i}`}});
     assert.equal(flushes,beforeEvents);
+    assert.equal(deliveries.filter(delivery=>delivery.channel==='app:update').length,beforeUpdates);
     worker.emit('message',{type:'done',runId:run.id,status:'completed',result:savedPlan,evidence:{successfulTools:['read_file'],changedFiles:[]}});
     assert.equal(flushes,beforeEvents+1);
-    const historyTask=(await snapshot()).tasks[0];assert.equal(historyTask.events.length,100);assert.ok(historyTask.eventCount>600);assert.equal(historyTask.runs[0].planText,savedPlan);
+    assert.equal(deliveries.filter(delivery=>delivery.channel==='app:update').length,beforeUpdates+1);
+    const update=deliveries.filter(delivery=>delivery.channel==='app:update').at(-1)!.value;
+    assert.deepEqual(update.tasks.map((task:any)=>task.id),[taskId]);assert.ok(!('settings' in update));
+    assert.ok(!JSON.stringify(update).includes(savedPlan));
+    const historyTask=(await snapshot()).tasks[0];assert.equal(historyTask.events.length,100);assert.ok(historyTask.eventCount>600);assert.equal(historyTask.runs[0].hasPlan,true);assert.ok(!('planText' in historyTask.runs[0]));assert.equal(await invoke('runs:plan',{taskId,runId:run.id}),savedPlan);
     await assert.rejects(invoke('task:events',{taskId:randomUUID()}),/任务不存在/);
     await assert.rejects(invoke('task:events',{taskId,before:'wrong-cursor'}),/游标不存在/);
     await assert.rejects(invoke('task:events',{taskId,extra:true}));
@@ -129,18 +147,28 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await invoke('task:archive',{taskId,archived:false});assert.equal((await snapshot()).tasks[0].archivedAt,undefined);
     await invoke('task:submit',{projectId:project.id,taskId,prompt:'执行计划',mode:'execute',planRunId:run.id});
     task=(await snapshot()).tasks[0];const second=task.runs.at(-1);assert.notEqual(second.id,run.id);assert.equal(second.planRunId,run.id);
-    assert.ok(task.messages.at(-1).content.includes(savedPlan));assert.ok(!task.messages.at(-1).content.includes('临时思路'));
+    await new Promise(r=>setImmediate(r));
+    const startMessage=workers.at(-1).sent.find((m:any)=>m.type==='start');
+    assert.ok(startMessage.task.messages.at(-1).content.includes(savedPlan));assert.ok(!startMessage.task.messages.at(-1).content.includes('临时思路'));
     const w=workers.at(-1), change={id:randomUUID(),runId:second.id,path:'a.txt',before:'old',after:'new',beforeVersion:version('old'),afterVersion:version('new'),check:checkSyntax('a.txt','new'),state:'prepared',patch:'-old\n+new'};
     w.emit('message',{type:'checkpoint',runId:second.id,checkpoint:change});
     assert.ok(w.sent.some((m:any)=>m.type==='checkpoint-ack'&&m.id===change.id));
     const SQL=await require('sql.js')();const db=new SQL.Database(await fs.readFile(path.join(userData,'local-code.sqlite')));assert.equal(db.exec('SELECT count(*) FROM checkpoints')[0].values[0][0],1);db.close();
     await fs.writeFile(path.join(root,'a.txt'),'new');w.emit('message',{type:'change',runId:second.id,change:{path:'a.txt',before:'old',after:'new',patch:change.patch},checkpoint:{...change,state:'written'}});
+    const patch=await invoke('changes:patch',{taskId,runId:second.id,path:'a.txt'});assert.equal(patch.patch,change.patch);
+    const detail=await invoke('task:detail',taskId);assert.equal(detail.runs.at(-1).changes[0].patchVersion,patch.version);
+    for(const key of ['before','after','patch'])assert.ok(!(key in detail.runs.at(-1).changes[0]));
+    await assert.rejects(invoke('changes:patch',{taskId,runId:run.id,path:'a.txt'}),/修改记录不存在/);
+    await assert.rejects(invoke('changes:patch',{taskId,runId:second.id,path:'a.txt',extra:true}));
+    await assert.rejects(invoke('runs:plan',{taskId,runId:second.id}),/计划缺少/);
+    await assert.rejects(invoke('tasks:search',{projectId:project.id,archived:false,query:'计划',extra:true}));
+    assert.deepEqual(await invoke('tasks:search',{projectId:project.id,archived:false,query:'先计划'}),[taskId]);
     await assert.rejects(invoke('rollback:preview',{taskId,runId:second.id,path:'a.txt'}),/运行中或排队/);
     w.emit('message',{type:'done',runId:second.id,status:'completed',evidence:{successfulTools:['write_file'],changedFiles:['a.txt']}});
     const preview=await invoke('rollback:preview',{taskId,runId:second.id,path:'a.txt'});assert.match(preview.patch,/-new/);
     await fs.writeFile(path.join(root,'a.txt'),'manual');await assert.rejects(invoke('rollback:confirm',preview.token),/冲突/);assert.equal(await fs.readFile(path.join(root,'a.txt'),'utf8'),'manual');
     await fs.writeFile(path.join(root,'a.txt'),'new');const preview2=await invoke('rollback:preview',{taskId,runId:second.id,path:'a.txt'});await invoke('rollback:confirm',preview2.token);
-    assert.equal(await fs.readFile(path.join(root,'a.txt'),'utf8'),'old');task=(await snapshot()).tasks[0];assert.equal(task.runs.at(-1).changes[0].state,'reverted');assert.equal(task.changes.length,0);assert.ok(task.messages.at(-1).content.includes('重新读取'));
+    assert.equal(await fs.readFile(path.join(root,'a.txt'),'utf8'),'old');task=(await snapshot()).tasks[0];assert.equal(task.runs.at(-1).changes[0].state,'reverted');assert.equal(task.changes.length,0);assert.ok(task.events.at(-1).text.includes('重新读取'));
     await assert.rejects(invoke('task:submit',{projectId:project.id,taskId,prompt:'review',mode:'review'}),/选择已有核验记录/);
     await invoke('task:submit',{projectId:project.id,taskId,prompt:'review',mode:'review',reviewRunId:second.id});assert.equal((await snapshot()).tasks[0].runs.at(-1).reviewRunId,second.id);
     const lastRun=(await snapshot()).tasks[0].currentRunId;

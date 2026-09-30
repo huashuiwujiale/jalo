@@ -1,5 +1,6 @@
-import React from 'react';
-import type { Run } from '../shared/types';
+import React, { useState } from 'react';
+import type { Run, RunView } from '../shared/types';
+import { useRemoteResource } from './remote-resource';
 
 export function HistoryControls({ hasMore, loading, incomplete, load }: { hasMore: boolean; loading: boolean; incomplete?: boolean; load: () => void }) {
   return <div className="history-pagination">
@@ -8,10 +9,13 @@ export function HistoryControls({ hasMore, loading, incomplete, load }: { hasMor
   </div>;
 }
 
-export function PlanActions({ run, disabled, execute }: { run: Run; disabled: boolean; execute: () => void }) {
+export function PlanActions({ run, disabled, execute, load }: { run: Run | RunView; disabled: boolean; execute: () => void; load?: () => Promise<string> }) {
+  const [open, setOpen] = useState(false);
+  const saved = 'planText' in run ? run.planText : undefined;
+  const resource = useRemoteResource(open && !saved && load ? run.id : '', () => load!());
   if (run.mode !== 'plan' || run.status !== 'completed') return null;
-  if (!run.planText?.trim()) return <p className="inspector-note">该计划缺少完整保存的正文，请重新生成计划后执行。</p>;
-  return <div className="saved-plan"><details><summary>查看保存的计划</summary><pre>{run.planText}</pre></details>
+  if (!('hasPlan' in run ? run.hasPlan : saved?.trim())) return <p className="inspector-note">该计划缺少完整保存的正文，请重新生成计划后执行。</p>;
+  return <div className="saved-plan"><details onToggle={event => setOpen(event.currentTarget.open)}><summary>查看保存的计划</summary><pre>{saved || resource.value || resource.error || '正在加载保存的计划…'}</pre>{resource.error && <button onClick={resource.retry}>重试</button>}</details>
     <button className="primary" disabled={disabled} onClick={execute}>按计划执行</button>
   </div>;
 }

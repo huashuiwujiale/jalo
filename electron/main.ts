@@ -14,8 +14,10 @@ import { EvaluationController } from './evaluation';
 import { DiagnosticLog, diagnosticReport, errorCategory, saveDiagnosticReport } from './diagnostics';
 import { LMStudioProvider } from '../engine/provider';
 import { settingsSchema, submitSchema } from '../shared/validation';
-import { linkedPlanContext, pageTaskEvents, taskHistorySnapshot } from '../shared/task-history';
-import { busyStatuses, type AppInfo, type EngineEvent, type Settings, type Snapshot, type Task, type Run, type Progress } from '../shared/types';
+import { linkedPlanContext, pageTaskEvents } from '../shared/task-history';
+import { changeView, searchTaskIds, taskDetail, taskSummary } from '../shared/task-wire';
+import { ReplyStream, UpdateBatch } from './ipc-updates';
+import { busyStatuses, type AppInfo, type EngineEvent, type Settings, type Snapshot, type Task, type Run, type Progress, type TaskSummary } from '../shared/types';
 
 // Keep legacy identity when upgrading: macOS safeStorage keys also depend on the app name.
 const legacyDataPath = path.join(app.getPath('appData'), 'Local Code');
@@ -53,8 +55,22 @@ function settings(): Settings {
   }
   return saved;
 }
-function snapshot(): Snapshot { return { projects: store.projects(), tasks: tasks.map(taskHistorySnapshot), settings: settings(), activeId: active?.task.id, evaluations: evaluation?.reports() || [] }; }
-function broadcast() { if (win && !win.isDestroyed()) win.webContents.send('app:update', snapshot()); }
+const taskRevisions = new Map<string, number>();
+const summaries = new Map<string, TaskSummary>();
+function summary(task: Task) {
+  const revision = taskRevisions.get(task.id) || 0, cached = summaries.get(task.id);
+  if (cached?.revision === revision) return cached;
+  const value = taskSummary(task, revision); summaries.set(task.id, value); return value;
+}
+const updates = new UpdateBatch((ids, global, sequence) => ({ sequence, tasks: tasks.filter(task => ids.includes(task.id)).map(summary), activeId: active?.task.id,
+  ...(global ? { projects: store.projects(), settings: settings(), evaluations: evaluation?.reports() || [] } : {}) }),
+  update => { if (win && !win.isDestroyed()) win.webContents.send('app:update', update); });
+const replies = new ReplyStream(frame => { if (win && !win.isDestroyed()) win.webContents.send('task:delta', frame); });
+function snapshot(): Snapshot { return { sequence: updates.sequence, projects: store.projects(), tasks: tasks.map(summary), settings: settings(), activeId: active?.task.id, evaluations: evaluation?.reports() || [] }; }
+function broadcast(task?: Task, immediate = true) {
+  if (task) taskRevisions.set(task.id, (taskRevisions.get(task.id) || 0) + 1);
+  updates.queue(task?.id, immediate);
+}
 function storageFailure(task: Task, error: unknown) {
   storageFailed = true;
   diagnostics.record({ event: 'ipc_error', errorCategory: errorCategory(error) });
@@ -64,22 +80,23 @@ function storageFailure(task: Task, error: unknown) {
   }
   configs.delete(task.id); task.approval = undefined; task.status = 'failed';
   task.error = '任务记录保存失败，已停止执行。请检查磁盘空间和数据目录权限后重试。';
-  syncRun(task); broadcast();
+  replies.end(task.id); syncRun(task); broadcast(task);
 }
-function persist(task: Task, durability: 'immediate' | 'deferred' = 'immediate', runId = task.currentRunId) {
+function persist(task: Task, durability: 'immediate' | 'deferred' = 'immediate', runId = task.currentRunId, notify = true) {
   syncRun(task);
   if (durability === 'deferred') store.deferTask(task, runId, error => storageFailure(task, error));
   else {
     try { store.putTask(task, runId); storageFailed = false; }
     catch (error) { storageFailure(task, error); throw error; }
   }
-  broadcast();
+  if (notify) broadcast(task, durability === 'immediate');
 }
 function idleRequired() { if (evaluation?.busy) throw new Error('模型能力实测正在运行，请先停止或完成实测'); if (modelOperation || tasks.some(t => busyStatuses.includes(t.status))) throw new Error('请先停止或完成运行中和排队中的任务，再调整模型或设置'); }
 function killProcesses(pids: Set<number>) { for (const pid of pids) { try { process.kill(-pid, 'SIGKILL'); } catch {} } }
 function finish(task: Task, status: Task['status'], error?: string) {
   if (!active || active.task.id !== task.id) return;
   const previous = active;
+  replies.end(task.id);
   clearTimeout(previous.timer); killProcesses(previous.pids);
   task.status = status; task.error = error; task.approval = undefined;
   diagnostics.record({ event: 'task_finished', taskId: task.id, runId: task.currentRunId, status, ...(error ? { errorCategory: errorCategory(error) } : {}) });
@@ -106,6 +123,7 @@ function pump() {
         if (event.type === 'context') { if (run) { run.contextUsage = event.usage; persist(task, 'deferred'); } return; }
         if (event.type === 'progress') {
           if (run && run.progress?.phase !== 'stopping' && !task.approval) {
+            if (event.progress.phase === 'waiting_model') replies.start(task.id, run.id);
             run.progress = event.progress; persist(task, 'deferred');
             diagnostics.record({ event: 'task_phase', taskId: task.id, runId: run.id, phase: event.progress.phase, step: event.progress.step, tool: event.progress.tool });
           }
@@ -121,9 +139,9 @@ function pump() {
         }
         if (event.type === 'check' && run) run.checks.push(event.check);
         if (event.type === 'process') { if (event.running) { active.pids.add(event.pid); if (run?.progress?.phase !== 'stopping') { progress(task, 'command'); persist(task, 'deferred'); } } else active.pids.delete(event.pid); return; }
-        if (event.type === 'delta') { win?.webContents.send('task:delta', { taskId: task.id, text: event.text }); return; }
-        if (event.type === 'messages') task.messages = event.messages;
-        if (event.type === 'event') { task.events.push(event.event); if (event.event.kind === 'error') diagnostics.record({ event: 'tool_error', taskId: task.id, runId: task.currentRunId, errorCategory: errorCategory(event.event.text) }); }
+        if (event.type === 'delta') { replies.append(task.id, task.currentRunId!, event.text); return; }
+        if (event.type === 'messages') { task.messages = event.messages; persist(task, 'deferred', task.currentRunId, false); return; }
+        if (event.type === 'event') { task.events.push(event.event); if (event.event.role === 'assistant') replies.end(task.id); if (event.event.kind === 'error') diagnostics.record({ event: 'tool_error', taskId: task.id, runId: task.currentRunId, errorCategory: errorCategory(event.event.text) }); }
         if (event.type === 'change') { if (run && event.checkpoint) { const i = run.changes.findIndex(c => c.path === event.checkpoint!.path); if (i < 0) run.changes.push(event.checkpoint); else run.changes[i] = event.checkpoint; } const index = task.changes.findIndex(c => c.path === event.change.path); if (index < 0) task.changes.push(event.change); else task.changes[index] = event.change; }
         if (event.type === 'approval') { if (run?.progress?.phase === 'stopping') return; task.approval = event.approval; task.status = 'waiting'; progress(task, 'approval'); }
         if (event.type === 'approval-resolved') { task.approval = undefined; task.status = 'running'; if (run?.progress?.phase !== 'stopping') progress(task, 'tool'); }
@@ -214,14 +232,22 @@ function registerApi() {
   register('task:rename', (raw: unknown) => {
     const input = z.object({ taskId: uuid, title: z.string().trim().min(1).max(100) }).strict().parse(raw);
     const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
-    task.title = input.title; store.putTask(task); broadcast();
+    task.title = input.title; store.putTask(task); broadcast(task);
   });
   register('task:archive', (raw: unknown) => {
     const input = z.object({ taskId: uuid, archived: z.boolean() }).strict().parse(raw);
     const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
     if (projectLocks.has(task.projectId) || busyStatuses.includes(task.status)) throw new Error('请先停止或完成任务，再归档或恢复');
     if (input.archived) task.archivedAt ??= Date.now(); else delete task.archivedAt;
-    store.putTask(task); broadcast();
+    store.putTask(task); broadcast(task);
+  });
+  register('task:detail', (raw: unknown) => {
+    const id = uuid.parse(raw), task = tasks.find(task => task.id === id); if (!task) throw new Error('任务不存在');
+    return taskDetail(task, taskRevisions.get(id) || 0, replies.snapshot(id));
+  });
+  register('tasks:search', (raw: unknown) => {
+    const input = z.object({ projectId: uuid, archived: z.boolean(), query: z.string().max(100000) }).strict().parse(raw);
+    return searchTaskIds(tasks, input.projectId, input.archived, input.query);
   });
   register('task:events', (raw: unknown) => {
     const input = z.object({ taskId: uuid, before: z.string().min(1).max(200).optional() }).strict().parse(raw);
@@ -254,6 +280,18 @@ function registerApi() {
   register('files:preview', async (raw: unknown) => { const v = z.object({ projectId: uuid, path: z.string().min(1).max(1024), startLine: z.number().int().min(1).optional() }).strict().parse(raw); return previewFile(projectById(v.projectId).path, v.path, v.startLine); });
   register('files:reference', async (raw: unknown) => { const v = z.object({ projectId: uuid, path: z.string().min(1).max(1024) }).strict().parse(raw); return referenceFile(projectById(v.projectId),v.path); });
   const locateRun = (taskId: string, runId: string) => { const task = tasks.find(t => t.id === taskId); const run = task?.runs?.find(r => r.id === runId); if (!task || !run) throw new Error('历史数据缺少轮次核验，无法进行此操作'); return { task, run }; };
+  register('runs:plan', (raw: unknown) => {
+    const v = z.object({ taskId: uuid, runId: uuid }).strict().parse(raw), { run } = locateRun(v.taskId, v.runId);
+    if (run.mode !== 'plan' || run.status !== 'completed' || !run.planText?.trim()) throw new Error('该计划缺少完整保存的正文，请重新生成计划后执行');
+    return run.planText;
+  });
+  register('changes:patch', (raw: unknown) => {
+    const v = z.object({ taskId: uuid, runId: uuid.optional(), path: z.string().min(1).max(1024) }).strict().parse(raw);
+    const task = tasks.find(task => task.id === v.taskId); if (!task) throw new Error('任务不存在');
+    const changes = v.runId ? locateRun(v.taskId, v.runId).run.changes : task.changes;
+    const change = changes.find(change => change.path === v.path); if (!change) throw new Error('修改记录不存在');
+    return { patch: change.patch, version: changeView(change).patchVersion };
+  });
   register('runs:changes', (raw: unknown) => { const v = z.object({ taskId: uuid, runId: uuid }).strict().parse(raw); return locateRun(v.taskId, v.runId).run.changes; });
   register('rollback:preview', async (raw: unknown) => {
     const v = z.object({ taskId: uuid, runId: uuid, path: z.string().min(1).max(1024) }).strict().parse(raw);
@@ -379,6 +417,7 @@ else {
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', () => {
     if (quitting) return; quitting = true;
+    updates.dispose(); replies.dispose();
     if(store)closingProjectIds = store.projects(true).map(p=>p.id);
     try{session?.flush();}catch{diagnostics.record({event:'ipc_error',errorCategory:'permission'});}
     diagnostics.record({ event: 'app_quit' });

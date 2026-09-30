@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import type { Task } from '../shared/types';
+import type { Task, TaskDetail } from '../shared/types';
 import { busyStatuses } from '../shared/types';
 import { phaseLabels, recoverySummary } from '../shared/progress';
 const duration = (ms: number) => { const seconds = Math.max(0, Math.floor(ms / 1000)); return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`; };
-export function TaskProgress({ task }: { task: Task }) {
+export function TaskProgress({ task }: { task: Task | TaskDetail }) {
   const [now, setNow] = useState(Date.now());
   const run = task.runs?.find(r => r.id === task.currentRunId) || task.runs?.at(-1);
   const busy = busyStatuses.includes(task.status);
@@ -15,7 +15,7 @@ export function TaskProgress({ task }: { task: Task }) {
     <small>{p?.phase === 'approval' ? '等待你的选择；确认后才会启动命令。' : p?.phase === 'waiting_model' ? '请求已发出，尚未收到生成内容；单次推理请求最多等待 5 分钟。' : p?.phase === 'generating' ? '已收到模型生成内容；工具参数完整返回并通过校验后才执行。' : p?.phase === 'stopping' ? '正在取消请求并终止本任务启动的命令。' : p?.phase === 'loading' ? '模型正在加载，耗时取决于模型大小和本机资源。' : '已完成的修改会保留，可在右侧查看实际差异。'}</small>
   </div>;
 }
-export function RecoveryPanel({ task, disabled, resume, inspect, settings }: { task: Task; disabled: boolean; resume: () => void; inspect: () => void; settings: () => void }) {
+export function RecoveryPanel({ task, disabled, resume, inspect, settings }: { task: Task | TaskDetail; disabled: boolean; resume: () => void; inspect: () => void; settings: () => void }) {
   if (!['failed','cancelled','interrupted'].includes(task.status)) return null;
   const { run, written, uncertain, hint } = recoverySummary(task);
   return <section className="task-error recovery-panel"><strong>{task.status === 'failed' ? '本轮执行失败' : task.status === 'cancelled' ? '本轮已停止' : '本轮已中断'}</strong>

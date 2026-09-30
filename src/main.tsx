@@ -2,11 +2,13 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ArrowUp, ArrowRight, Check, ChevronDown, ChevronRight, Code2, Cpu, FileCode2, Folder, FolderPlus, GitBranch, HardDrive, LoaderCircle, MessageSquare, Plus, RefreshCw, Settings2, ShieldCheck, Square, Terminal, X, Zap } from 'lucide-react';
 import { FilePicker, RunPanel, RunResult, modeLabels } from './reliability';
-import type { Mode, FileReference, Api, LocalModel, Settings, Snapshot, Task, Project } from '../shared/types';
+import type { Mode, FileReference, Api, LocalModel, Settings, Snapshot, TaskSummary, Project } from '../shared/types';
 import { busyStatuses, defaults } from '../shared/types';
 import './style.css';
-import { groupToolEvents } from './tool-events';
-import { ToolCard } from './tool-card';
+import { TimelineRows } from './timeline-rows';
+import { StreamingReply } from './streaming-reply';
+import { useTaskDetail } from './task-detail';
+import { applyUpdate } from '../shared/app-state';
 import { TaskProgress, RecoveryPanel } from './task-progress';
 import { ContextMeter } from './context-usage';
 import { MentionInput } from './mention-input';
@@ -19,11 +21,11 @@ import { capturePosition, restorePosition } from './session-scroll';
 import { useEventHistory } from './event-history';
 import { HistoryControls, PlanActions } from './history-controls';
 declare global { interface Window { localCode: Api } }
-const statusText: Record<Task['status'], string> = { queued: '排队中', running: '执行中', waiting: '等待确认', completed: '本轮结束', failed: '执行失败', cancelled: '已停止', interrupted: '已中断' };
+const statusText: Record<TaskSummary['status'], string> = { queued: '排队中', running: '执行中', waiting: '等待确认', completed: '本轮结束', failed: '执行失败', cancelled: '已停止', interrupted: '已中断' };
 const api = window.localCode;
 
 function App() {
-  const [state, setState] = useState<Snapshot>({ projects: [], tasks: [], settings: defaults });
+  const [state, setState] = useState<Snapshot>({ sequence: -1, projects: [], tasks: [], settings: defaults });
   const [projectId, setProjectId] = useState('');
   const [taskId, setTaskId] = useState('');
   const [prompt, setPrompt] = useState('');
@@ -38,7 +40,6 @@ function App() {
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
   const [referencePending, setReferencePending] = useState(false);
-  const [streams, setStreams] = useState<Record<string, string>>({});
   const [sessionReady, setSessionReady] = useState(false);
   const [viewRevision, setViewRevision] = useState(0);
   const sessions = useRef(emptySession());
@@ -49,16 +50,16 @@ function App() {
   const followLatest = useRef(true);
   const previousScrollTop = useRef(0);
   const [showLatest, setShowLatest] = useState(false);
-  const scrollToLatest = () => {
+  const scrollToLatest = (save = true) => {
     const element = conversation.current;
     if (!element) return;
     followLatest.current = true;
     // Scroll this panel only. Smooth scrolling on every token fights user gestures.
     const bottom = Math.max(0, element.scrollHeight - element.clientHeight);
-    if (Math.abs(element.scrollTop - bottom) > 1) element.scrollTop = bottom;
+    if (Math.abs(element.scrollTop - bottom) > 1) { element.scrollTop = bottom; restoredTop.current = element.scrollTop; }
     previousScrollTop.current = element.scrollTop;
     setShowLatest(false);
-    rememberCurrent();
+    if (save) rememberCurrent();
   };
   const pauseFollowing = () => {
     followLatest.current = false;
@@ -81,14 +82,16 @@ function App() {
     rememberCurrent();
   };
   const project = state.projects.find(p => p.id === projectId);
-  const task = state.tasks.find(t => t.id === taskId);
+  const selected = state.tasks.find(t => t.id === taskId);
+  const detail = useTaskDetail(selected, api);
+  const task = detail.task;
   const fail = (e: unknown) => setError((e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': Error: /, ''));
   const history = useEventHistory(task, api, pendingPosition.current?.follow === false ? pendingPosition.current.anchor : undefined, () => {
     if (!pendingPosition.current) { pendingPosition.current = capturePosition(conversation.current, followLatest.current); setViewRevision(n => n + 1); }
   }, e => fail(e));
-  const isBusy = !!task && busyStatuses.includes(task.status);
+  const isBusy = !!selected && busyStatuses.includes(selected.status);
   const evaluating = state.evaluations?.some(r => r.status === 'running');
-  const composerLocked = isBusy || !!task?.archivedAt;
+  const composerLocked = isBusy || !!selected?.archivedAt || (!!selected && (!task || detail.loading || !!detail.error));
   const run = task?.runs?.find(r => r.id === runId) || task?.runs?.at(-1);
   const invalidReferences = references.some(r => r.projectId !== projectId);
   const projectBusy = state.tasks.some(t => t.projectId === projectId && busyStatuses.includes(t.status));
@@ -110,24 +113,28 @@ function App() {
   }
   useEffect(() => {
     if (!api) { setError('请通过 npm run dev 打开桌面应用；普通浏览器无法访问本地工具。'); return; }
-    Promise.all([api.snapshot(), api.loadSession()]).then(([s, saved]) => {
-      sessions.current = saved.state; setState(s); openView(restoreView(saved.state,s),false); setSessionReady(true);
+    let initialized = false, disposed = false;
+    const buffered: Parameters<typeof applyUpdate>[1][] = [];
+    const offState = api.onUpdate(update => {
+      if (!initialized) buffered.push(update);
+      else setState(previous => applyUpdate(previous, update));
+    });
+    Promise.all([api.snapshot(), api.loadSession()]).then(([snapshot, saved]) => {
+      if (disposed) return;
+      const hydrated = buffered.reduce(applyUpdate, snapshot);
+      initialized = true; buffered.length = 0;
+      sessions.current = saved.state; setState(hydrated); openView(restoreView(saved.state, hydrated), false); setSessionReady(true);
       if (saved.warning) setError(saved.warning);
     }).catch(fail);
-    const offState = api.onUpdate(s => {
-      setState(s);
-      setStreams(previous => { const next = { ...previous }; for (const t of s.tasks) { if (!busyStatuses.includes(t.status) || t.events.at(-1)?.role === 'assistant') delete next[t.id]; } return next; });
-    });
-    const offDelta = api.onDelta(({ taskId, text }) => setStreams(old => ({ ...old, [taskId]: (old[taskId] || '') + text })));
-    return () => { offState(); offDelta(); };
+    return () => { disposed = true; offState(); };
   }, []);
   useLayoutEffect(() => {
     const element=conversation.current, saved=pendingPosition.current;
-    if (!sessionReady || !element || !saved || history.restoring) return;
+    if (!sessionReady || !element || !saved || (taskId && !task) || history.restoring) return;
     pendingPosition.current=undefined; followLatest.current=saved.follow;
     previousScrollTop.current=restorePosition(element,saved);restoredTop.current=element.scrollTop;
     setShowLatest(!saved.follow);
-  }, [sessionReady, viewRevision, history.restoring, history.events.length]);
+  }, [sessionReady, viewRevision, history.restoring, history.events.length, task?.id]);
   useLayoutEffect(() => {
     if (!sessionReady) return;
     currentView.current = { projectId,taskId,prompt,mode,references,runId,tab,scroll:pendingPosition.current || capturePosition(conversation.current,followLatest.current) };
@@ -140,23 +147,23 @@ function App() {
     return () => window.removeEventListener('beforeunload',flush);
   },[sessionReady]);
   useLayoutEffect(() => {
-    if (followLatest.current && !pendingPosition.current) scrollToLatest();
-  }, [task?.events.length, task?.events.at(-1)?.id, streams[taskId], task?.approval?.id, task?.status]);
+    if (followLatest.current && !pendingPosition.current) scrollToLatest(false);
+  }, [task?.events.length, task?.events.at(-1)?.id, task?.approval?.id, task?.status]);
   useEffect(() => {
     const element = conversation.current;
     if (!element) return;
     const observer = new ResizeObserver(() => {
-      if (followLatest.current && !pendingPosition.current) scrollToLatest();
+      if (followLatest.current && !pendingPosition.current) scrollToLatest(false);
     });
     observer.observe(element);
     if (element.firstElementChild) observer.observe(element.firstElementChild);
     return () => observer.disconnect();
-  }, [sessionReady, projectId, taskId]);
+  }, [sessionReady, projectId, taskId, task?.id]);
   const chooseProject = (id: string) => {
     if (sending || id === projectId || !state.projects.some(p => p.id === id)) return;
     openView(restoreView(sessions.current,state,{projectId:id,taskId:sessions.current.projectTasks[id] || ''}));
   };
-  const addProject = async () => { if(sending)return;setSending(true);try { const p = await api.addProject(); if (p) { const snapshot=await api.snapshot();setState(snapshot);openView(restoreView(sessions.current,snapshot,{projectId:p.id,taskId:sessions.current.projectTasks[p.id] || ''})); } } catch (e) { fail(e); } finally {setSending(false);} };
+  const addProject = async () => { if(sending)return;setSending(true);try { const p = await api.addProject(); if (p) { const snapshot=await api.snapshot();setState(current => current.sequence > snapshot.sequence ? current : snapshot);openView(restoreView(sessions.current,snapshot,{projectId:p.id,taskId:sessions.current.projectTasks[p.id] || ''})); } } catch (e) { fail(e); } finally {setSending(false);} };
   const submit = async (planRunId?: string) => {
     if ((!prompt.trim() && !planRunId) || sending || referencePending || isBusy) return;
     if (task?.archivedAt) { setError('请先恢复已归档任务，再继续对话'); return; }
@@ -173,7 +180,7 @@ function App() {
     } catch (e) { fail(e); }
     finally { setSending(false); }
   };
-  const chooseTask = (t: Task) => { if(sending || t.id===taskId)return;openView(restoreView(sessions.current,state,{projectId:t.projectId,taskId:t.id})); };
+  const chooseTask = (t: TaskSummary) => { if(sending || t.id===taskId)return;openView(restoreView(sessions.current,state,{projectId:t.projectId,taskId:t.id})); };
   const newTask = () => { if(sending || !taskId)return;openView(restoreView(sessions.current,state,{projectId,taskId:''})); };
   if(!sessionReady)return <div className="session-loading" role="status">{error || '正在恢复本地会话…'}{error && <button onClick={()=>window.location.reload()}>重试</button>}</div>;
   return <div className="app-shell">
@@ -193,12 +200,13 @@ function App() {
         onKeyDown={event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) pauseFollowing(); }}
         onClickCapture={event => { if ((event.target as HTMLElement).closest('summary')) pauseFollowing(); }}
         tabIndex={0} role="region" aria-label="任务对话记录">
-        {!task ? <section className="welcome"><div className="welcome-icon"><Code2 size={31}/><span/></div><div className="eyebrow">YOUR LOCAL WORKSPACE</div><h1>把想法，变成代码。</h1><p>连接你自己的模型，在熟悉的项目里开始工作。<br/>从理解代码到完成修改，每一步都清晰可见。</p><div className="suggestions">
+        {selected && !task ? <div className="session-loading" role="status">{detail.error || '正在加载任务记录…'}{detail.error && <button onClick={detail.retry}>重试</button>}</div> : !task ? <section className="welcome"><div className="welcome-icon"><Code2 size={31}/><span/></div><div className="eyebrow">YOUR LOCAL WORKSPACE</div><h1>把想法，变成代码。</h1><p>连接你自己的模型，在熟悉的项目里开始工作。<br/>从理解代码到完成修改，每一步都清晰可见。</p><div className="suggestions">
           {[{ icon: Folder, title: '了解这个项目', text: '阅读项目结构和 AGENTS.md，介绍技术栈、主要模块与启动方式。暂不修改文件。' }, { icon: Code2, title: '检查一段实现', text: '检查项目的主要入口与核心逻辑，找出一个有明确证据的问题，先说明原因和修改建议。' }, { icon: GitBranch, title: '开始一个改动', text: '我想在这个项目中实现一个功能：' }].map(item => <button key={item.title} onClick={() => setPrompt(item.text)}><item.icon size={18}/><span>{item.title}</span><ArrowRight size={15}/></button>)}
           </div><div className="welcome-foot"><ShieldCheck size={14}/>项目内自动编辑 · 终端命令逐次确认</div></section> : <div className="timeline"><div className="task-heading"><span className={`status-tag ${task.status}`}>{statusText[task.status]}</span><span>{new Date(task.createdAt).toLocaleString('zh-CN')}</span></div>
           <HistoryControls hasMore={history.hasMore} loading={history.loading} incomplete={task.historyIncomplete} load={() => { pauseFollowing(); void history.loadEarlier(); }}/>
-          {groupToolEvents(history.events).map(e => e.kind === 'tool-group' ? <ToolCard key={e.id} group={e} active={busyStatuses.includes(task.status) && (!e.call.runId || e.call.runId === task.currentRunId)} waiting={task.status === 'waiting'}/> : e.kind === 'message' ? <article key={e.id} data-event-id={e.id} className={`message ${e.role}`}><div className="message-author">{e.role === 'user' ? <span className="avatar user-avatar">你</span> : <span className="avatar assistant-avatar"><Code2 size={15}/></span>}<strong>{e.role === 'user' ? '你' : 'Jalo'}</strong></div><div className="message-text">{e.text}</div></article> : e.kind === 'output' ? null : e.kind === 'notice' ? <div key={e.id} data-event-id={e.id} className="progress-line"><span/>{e.text}</div> : <details key={e.id} data-event-id={e.id} className={`tool-event ${e.kind}`}><summary><Terminal size={13}/><span>{e.text.split('\n')[0].slice(0, 150)}</span><ChevronDown size={12}/></summary><pre>{e.text}</pre></details>)}
-          {streams[taskId] && <article className="message assistant"><div className="message-author"><span className="avatar assistant-avatar"><Code2 size={15}/></span><strong>Jalo</strong><LoaderCircle className="spin" size={13}/></div><div className="message-text">{streams[taskId]}<span className="cursor"/></div></article>}
+          {detail.error && <div className="task-error" role="alert">任务记录加载失败：{detail.error}<button onClick={detail.retry}>重试</button></div>}
+          <TimelineRows events={history.events} busy={isBusy} runId={task.currentRunId} waiting={task.status === 'waiting'}/>
+          {task.currentRunId && <StreamingReply key={`${task.id}:${task.currentRunId}`} api={api} taskId={task.id} runId={task.currentRunId} initial={task.stream} onContent={() => { if (followLatest.current && !pendingPosition.current) scrollToLatest(false); }}/>}
           <RecoveryPanel task={task} disabled={sending || composerLocked} resume={() => {
             const latest = task.runs?.find(r => r.id === task.currentRunId) || task.runs?.at(-1);
             setMode(latest?.mode || task.mode || 'execute');
@@ -207,11 +215,11 @@ function App() {
             document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus();
           }} inspect={() => { setTab('changes'); setRunId(task.currentRunId || ''); }} settings={() => setSettingsOpen(true)}/>
           {task.legacy && <p className="inspector-note">历史数据，缺少轮次核验。</p>}
-          {run && !busyStatuses.includes(run.status) && <><RunResult run={run}/><PlanActions run={run} disabled={sending || projectBusy || !!task.archivedAt} execute={() => void submit(run.id)}/></>}
+          {run && !busyStatuses.includes(run.status) && <><RunResult run={run}/><PlanActions key={run.id} run={run} load={() => api.planText(task.id, run.id)} disabled={sending || projectBusy || detail.loading || !!task.archivedAt} execute={() => void submit(run.id)}/></>}
 
           </div>}
       </div>
-        {task && showLatest && <div className="latest-row"><button className="latest-button" onClick={scrollToLatest}><ChevronDown size={14}/>回到最新</button></div>}
+        {task && showLatest && <div className="latest-row"><button className="latest-button" onClick={() => scrollToLatest()}><ChevronDown size={14}/>回到最新</button></div>}
       </div>
       <div className="composer-area">
         {evaluating && <div className="archived-banner"><span>模型能力实测中，完成或停止后可提交任务。</span><button onClick={() => setSettingsOpen(true)}>查看实测</button></div>}
@@ -224,7 +232,7 @@ function App() {
         <div className={`composer ${composerLocked ? 'busy' : ''}`}><MentionInput key={`${projectId}:${taskId}`} api={api} project={project} placeholder={task?.archivedAt ? '恢复任务后可继续对话' : isBusy ? '任务正在执行，可停止后继续补充要求…' : '描述任务，输入 @ 引用文件…'} value={prompt} disabled={composerLocked || sending} canAdd={references.length < 8} onChange={setPrompt} onChoose={ref=>setReferences(old=>[...old.filter(r=>!(r.projectId===ref.projectId && r.path===ref.path)),ref].slice(0,8))} onPending={setReferencePending} submit={()=>void submit()}/><div className="composer-toolbar"><label className="composer-project" title={project?.path || '选择任务所在项目'}><Folder size={13}/><select aria-label="切换任务项目" value={projectId} disabled={sending || !state.projects.length} onChange={e => chooseProject(e.target.value)}>
           {!projectId && <option value="" disabled>未选择项目</option>}
           {state.projects.map(p => <option key={p.id} value={p.id}>{state.projects.filter(other => other.name === p.name).length > 1 ? `${p.name} — ${p.path}` : p.name}</option>)}
-        </select><ChevronDown size={12}/></label><div>{isBusy ? <><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[task!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(task!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || referencePending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
+        </select><ChevronDown size={12}/></label><div>{isBusy ? <><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[selected!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(selected!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || referencePending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
         <div className="composer-caption"><ShieldCheck size={12}/>推理由你配置的 LM Studio 提供<span>Jalo / 开发版</span></div>
       </div>
     </main>

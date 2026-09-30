@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { referenceSchema } from './validation';
-import type { Snapshot } from './types';
+import type { Project, Task, TaskSummary } from './types';
 const id = z.union([z.string().uuid(), z.literal('')]);
 export const selectionSchema = z.object({ projectId: id, taskId: id }).strict();
 export const scrollSchema = z.object({ top: z.number().finite().min(0).max(1e9), follow: z.boolean(), anchor: z.string().max(200).optional(), offset: z.number().finite().min(-1e7).max(1e7).optional(), expanded: z.array(z.string().max(200)).max(600) }).strict();
@@ -15,11 +15,12 @@ export function rememberView(state: SessionState, view: SessionView) {
   state.selected = { projectId:view.projectId, taskId:view.taskId };
   if(view.projectId) state.projectTasks[view.projectId] = view.taskId;
 }
-export function restoreView(state: SessionState, snapshot: Pick<Snapshot,'projects'|'tasks'>, selection = state.selected): SessionView {
+export function restoreView(state: SessionState, snapshot: { projects: Project[]; tasks: (TaskSummary | Task)[] }, selection = state.selected): SessionView {
   const projectId = snapshot.projects.some(p=>p.id===selection.projectId) ? selection.projectId : snapshot.projects[0]?.id || '';
   const preferred = projectId === selection.projectId ? selection.taskId : state.projectTasks[projectId] || '';
   const task = snapshot.tasks.find(t=>t.id===preferred && t.projectId===projectId);
   const view = structuredClone(state.views[viewKey(projectId,task?.id || '')] || emptyView(projectId,task?.id));
-  if(view.runId && !task?.runs?.some(r=>r.id===view.runId)) view.runId = '';
+  const runIds = task && ('runIds' in task ? task.runIds : task.runs?.map(run => run.id));
+  if(view.runId && !runIds?.includes(view.runId)) view.runId = '';
   return view;
 }

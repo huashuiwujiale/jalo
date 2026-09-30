@@ -40,7 +40,17 @@ export interface Task {
   id: string; projectId: string; title: string; model: string; status: Status; createdAt: number; queuedAt?: number;
   messages: Message[]; events: Event[]; changes: Change[]; approval?: Approval; error?: string; lastRun?: RunEvidence; mode?: Mode; runs?: Run[]; currentRunId?: string; legacy?: boolean;
 }
-export interface Snapshot { projects: Project[]; tasks: Task[]; settings: Settings; activeId?: string; evaluations?: import('./evaluation').EvaluationReport[] }
+export interface TaskSummary extends Pick<Task, 'id' | 'projectId' | 'title' | 'model' | 'status' | 'createdAt' | 'queuedAt' | 'archivedAt' | 'currentRunId' | 'mode' | 'error' | 'legacy' | 'historyIncomplete'> {
+  revision: number; eventCount: number; changeCount: number; runIds: string[]; requestCount: number;
+}
+export interface ChangeView { path: string; changed: boolean; patchVersion: string }
+export interface RunChangeView extends ChangeView, Pick<RunChange, 'id' | 'runId' | 'state' | 'check' | 'revertedAt'> {}
+export interface RunView extends Omit<Run, 'references' | 'changes' | 'planText'> { references: FileReference[]; changes: RunChangeView[]; hasPlan: boolean }
+export interface StreamState { taskId: string; runId: string; version: number; text: string; ended: boolean }
+export interface StreamFrame extends Omit<StreamState, 'ended'> { kind: 'reset' | 'append' | 'end'; offset: number }
+export interface TaskDetail extends Omit<Task, 'messages' | 'runs' | 'changes'> { revision: number; runs: RunView[]; changes: ChangeView[]; stream?: StreamState }
+export interface Snapshot { sequence: number; projects: Project[]; tasks: TaskSummary[]; settings: Settings; activeId?: string; evaluations?: import('./evaluation').EvaluationReport[] }
+export interface AppUpdate extends Partial<Pick<Snapshot, 'projects' | 'settings' | 'evaluations'>> { sequence: number; tasks: TaskSummary[]; activeId?: string }
 export interface AppInfo {
   version: string; packaged: boolean; platform: string; arch: string;
   electron: string; chrome: string; node: string; osRelease: string;
@@ -74,6 +84,10 @@ export interface Api {
   renameTask(taskId: string, title: string): Promise<void>;
   archiveTask(taskId: string, archived: boolean): Promise<void>;
   taskEvents(input: { taskId: string; before?: string }): Promise<EventPage>;
+  taskDetail(taskId: string): Promise<TaskDetail>;
+  searchTasks(input: { projectId: string; archived: boolean; query: string }): Promise<string[]>;
+  planText(taskId: string, runId: string): Promise<string>;
+  changePatch(input: { taskId: string; runId?: string; path: string }): Promise<{ patch: string; version: string }>;
   saveSettings(settings: Settings): Promise<void>;
   models(): Promise<LocalModel[]>;
   loadModel(key: string): Promise<void>;
@@ -88,6 +102,6 @@ export interface Api {
   confirmRollback(token: string): Promise<void>;
   stop(taskId: string): Promise<void>;
   approve(taskId: string, approvalId: string, allow: boolean): Promise<void>;
-  onUpdate(fn: (state: Snapshot) => void): () => void;
-  onDelta(fn: (data: { taskId: string; text: string }) => void): () => void;
+  onUpdate(fn: (state: AppUpdate) => void): () => void;
+  onDelta(fn: (data: StreamFrame) => void): () => void;
 }
