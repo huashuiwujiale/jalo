@@ -17,6 +17,7 @@ import { settingsSchema, submitSchema } from '../shared/validation';
 import { linkedPlanContext, pageTaskEvents } from '../shared/task-history';
 import { changeView, searchTaskIds, taskDetail, taskSummary } from '../shared/task-wire';
 import { ReplyStream, UpdateBatch } from './ipc-updates';
+import { fileNameIndex } from '../engine/file-search';
 import { busyStatuses, type AppInfo, type EngineEvent, type Settings, type Snapshot, type Task, type Run, type Progress, type TaskSummary } from '../shared/types';
 
 // Keep legacy identity when upgrading: macOS safeStorage keys also depend on the app name.
@@ -138,11 +139,11 @@ function pump() {
           return;
         }
         if (event.type === 'check' && run) run.checks.push(event.check);
-        if (event.type === 'process') { if (event.running) { active.pids.add(event.pid); if (run?.progress?.phase !== 'stopping') { progress(task, 'command'); persist(task, 'deferred'); } } else active.pids.delete(event.pid); return; }
+        if (event.type === 'process') { if (event.running) { active.pids.add(event.pid); if (run?.progress?.phase !== 'stopping') { progress(task, 'command'); persist(task, 'deferred'); } } else { active.pids.delete(event.pid); fileNameIndex.clear(project.path); } return; }
         if (event.type === 'delta') { replies.append(task.id, task.currentRunId!, event.text); return; }
         if (event.type === 'messages') { task.messages = event.messages; persist(task, 'deferred', task.currentRunId, false); return; }
         if (event.type === 'event') { task.events.push(event.event); if (event.event.role === 'assistant') replies.end(task.id); if (event.event.kind === 'error') diagnostics.record({ event: 'tool_error', taskId: task.id, runId: task.currentRunId, errorCategory: errorCategory(event.event.text) }); }
-        if (event.type === 'change') { if (run && event.checkpoint) { const i = run.changes.findIndex(c => c.path === event.checkpoint!.path); if (i < 0) run.changes.push(event.checkpoint); else run.changes[i] = event.checkpoint; } const index = task.changes.findIndex(c => c.path === event.change.path); if (index < 0) task.changes.push(event.change); else task.changes[index] = event.change; }
+        if (event.type === 'change') { fileNameIndex.clear(project.path); if (run && event.checkpoint) { const i = run.changes.findIndex(c => c.path === event.checkpoint!.path); if (i < 0) run.changes.push(event.checkpoint); else run.changes[i] = event.checkpoint; } const index = task.changes.findIndex(c => c.path === event.change.path); if (index < 0) task.changes.push(event.change); else task.changes[index] = event.change; }
         if (event.type === 'approval') { if (run?.progress?.phase === 'stopping') return; task.approval = event.approval; task.status = 'waiting'; progress(task, 'approval'); }
         if (event.type === 'approval-resolved') { task.approval = undefined; task.status = 'running'; if (run?.progress?.phase !== 'stopping') progress(task, 'tool'); }
         if (event.type === 'done') { if (run?.mode === 'plan' && event.status === 'completed' && event.result?.trim()) run.planText = event.result; task.lastRun = event.evidence; finish(task, event.status, event.error); return; }
@@ -228,6 +229,7 @@ function registerApi() {
     if (!project) throw new Error('项目不存在或已移除');
     if (projectLocks.has(id) || tasks.some(t => t.projectId === id && busyStatuses.includes(t.status))) throw new Error('项目存在运行中、等待确认或排队任务，请先停止任务再移除');
     store.putProject({ ...project, removedAt: Date.now() }); broadcast();
+    fileNameIndex.clear(project.path);
   });
   register('task:rename', (raw: unknown) => {
     const input = z.object({ taskId: uuid, title: z.string().trim().min(1).max(100) }).strict().parse(raw);
@@ -313,6 +315,7 @@ function registerApi() {
     try {
       const change = run.changes.find(c => c.path === pending.path); if (!change || change.afterVersion !== pending.afterVersion) throw new Error('修改记录已变化，请重新预览');
       await restoreFile(projectById(task.projectId).path, change, path.join(app.getPath('userData'), 'recovery', run.id));
+      fileNameIndex.clear(projectById(task.projectId).path);
       change.state = 'reverted'; change.revertedAt = Date.now();
       const total = task.changes.find(c => c.path === change.path);
       if (total && total.after === change.after) {
@@ -418,6 +421,7 @@ else {
   app.on('before-quit', () => {
     if (quitting) return; quitting = true;
     updates.dispose(); replies.dispose();
+    fileNameIndex.clear();
     if(store)closingProjectIds = store.projects(true).map(p=>p.id);
     try{session?.flush();}catch{diagnostics.record({event:'ipc_error',errorCategory:'permission'});}
     diagnostics.record({ event: 'app_quit' });

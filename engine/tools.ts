@@ -7,6 +7,7 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 import { createTwoFilesPatch } from 'diff';
 import { checkSyntax, version } from './syntax';
 import { findVueElements } from './vue-elements';
+import { searchIgnored as ignored, walkSearchFiles } from './file-search';
 import type { Approval, Change, EngineEvent, RunEvidence, Mode, RunChange } from '../shared/types';
 import type { ToolDefinition } from './provider';
 
@@ -31,7 +32,6 @@ export const definitions: ToolDefinition[] = Object.entries(specs).map(([name, s
 const mutations = new Set(['write_file', 'edit_file', 'replace_lines', 'edit_vue_element', 'run_command']);
 export const toolsForMode = (mode: Mode = 'execute') => definitions.filter(t => mode === 'execute' || !mutations.has(t.function.name));
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
-const ignored = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.venv', 'coverage']);
 const isMissing = (e: any) => e?.code === 'ENOENT';
 export class EditMatchError extends Error {
   constructor(public file: string, message: string) { super(message); this.name = 'EditMatchError'; }
@@ -155,9 +155,16 @@ export class ToolRegistry {
         this.vueTargets.delete(full);
       }
     } else if (name === 'list_directory') {
-      const entries = await fs.readdir(await this.resolve(args.path), { withFileTypes: true });
-      result = entries.filter(e => !ignored.has(e.name)).slice(0, 200).map(e => `${e.isDirectory() ? '[目录]' : e.isSymbolicLink() ? '[链接，不访问]' : '[文件]'} ${e.name}`).join('\n');
-      if (entries.length > 200) result += '\n结果已截断';
+      const entries: string[] = []; let truncated = false;
+      const handle = await fs.opendir(await this.resolve(args.path));
+      for await (const entry of handle) {
+        this.options.signal.throwIfAborted();
+        if (ignored.has(entry.name)) continue;
+        if (entries.length >= 200) { truncated = true; break; }
+        entries.push(`${entry.isDirectory() ? '[目录]' : entry.isSymbolicLink() ? '[链接，不访问]' : '[文件]'} ${entry.name}`);
+      }
+      result = entries.join('\n');
+      if (truncated) result += '\n结果已截断';
     } else if (name === 'read_file') {
       const full = await this.resolve(args.path), text = await this.read(full);
       this.seen.set(full, hash(text));
@@ -173,24 +180,29 @@ export class ToolRegistry {
     } else if (name === 'write_file' || name === 'edit_file' || name === 'replace_lines') {
       result = await this.write(args.path, args, name !== 'write_file', name === 'replace_lines');
     } else if (name === 'search_files') {
-      const results: string[] = []; let visited = 0;
-      const walk = async (directory: string) => {
-        for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-          this.options.signal.throwIfAborted();
-          if (++visited > 3000 || results.length >= 50) return;
-          if (ignored.has(entry.name) || entry.isSymbolicLink()) continue;
-          const full = await this.resolve(path.relative(this.root, path.join(directory, entry.name)));
-          if (entry.isDirectory()) { await walk(full); continue; }
-          const rel = path.relative(this.root, full);
-          if (args.mode === 'name') { if (rel.toLowerCase().includes(args.query.toLowerCase())) results.push(rel); }
-          else {
-            try { const contents = await this.read(full); contents.split('\n').forEach((line, index) => { if (results.length < 50 && line.includes(args.query)) results.push(`${rel}:${index + 1}: ${line.slice(0, 240)}`); }); } catch (e) { if ((e as any).name === 'AbortError') throw e; }
-          }
+      const results: string[] = [], budget = { maxEntries: 3000, visited: 0, truncated: false };
+      const needle = args.query.toLowerCase(), signal = this.options.signal;
+      for await (const rel of walkSearchFiles(this, args.path, budget, signal)) {
+        if (args.mode === 'name') { if (rel.toLowerCase().includes(needle)) results.push(rel); }
+        else {
+          try {
+            const contents = await this.read(await this.resolve(rel));
+            // Walk lines without allocating a full split array, stopping at the cap.
+            let start = 0, lineNumber = 1;
+            while (start <= contents.length && results.length < 50) {
+              signal.throwIfAborted();
+              const newline = contents.indexOf('\n', start), end = newline < 0 ? contents.length : newline;
+              const line = contents.slice(start, end);
+              if (line.includes(args.query)) results.push(`${rel}:${lineNumber}: ${line.slice(0, 240)}`);
+              if (newline < 0) break;
+              start = newline + 1; lineNumber++;
+            }
+          } catch { signal.throwIfAborted(); } // Unreadable/non-text files are skipped.
         }
-      };
-      await walk(await this.resolve(args.path));
+        if (results.length >= 50) { budget.truncated = true; break; }
+      }
       result = results.join('\n') || '没有匹配结果';
-      if (visited > 3000 || results.length >= 50) result += '\n已达到搜索上限，请缩小目录或查询范围';
+      if (budget.truncated) result += '\n搜索未遍历全部文件（达到上限或目录不可访问），请缩小目录或查询范围';
     } else if (name === 'run_command') {
       result = await this.command(args.command, await this.resolve(args.cwd));
     } else {

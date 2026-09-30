@@ -5,25 +5,14 @@ import { version } from './syntax';
 import type { Project, FileReference, CapturedReference, FilePage, RunChange } from '../shared/types';
 import { createTwoFilesPatch } from 'diff';
 import { randomUUID } from 'node:crypto';
+import { fileNameIndex } from './file-search';
 export async function projectFiles(root: string) {
   const tools = new ToolRegistry({ root, backupDir: '', signal: new AbortController().signal, timeout: 1, mode: 'review', emit: () => {}, approve: async () => false });
   await tools.init(); return tools;
 }
 export async function searchFiles(root: string, query: string) {
-  const tools = await projectFiles(root), paths: string[] = [];
-  const ignored = new Set(['.git','node_modules','dist','build','.next','.venv','coverage']);
-  let visited = 0, truncated = false;
-  async function walk(relative = '.') {
-    for (const e of await fs.readdir(await tools.resolve(relative), { withFileTypes: true })) {
-      if (++visited > 10000 || paths.length >= 80) { truncated = true; return; }
-      if (e.isSymbolicLink() || ignored.has(e.name)) continue;
-      const file = path.join(relative, e.name);
-      if (e.isDirectory()) await walk(file);
-      else if (e.isFile() && file.toLowerCase().includes(query.toLowerCase())) paths.push(file);
-      if (truncated) return;
-    }
-  }
-  await walk(); return { paths, truncated };
+  const tools = await projectFiles(root);
+  return fileNameIndex.search(await tools.resolve('.'), query, tools);
 }
 export async function listDirectory(root: string, directory = '.') {
   const tools = await projectFiles(root);
