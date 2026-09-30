@@ -9,6 +9,7 @@ import { createRequire } from 'node:module';
 import { defaults } from '../shared/types';
 import { version, checkSyntax } from '../engine/syntax';
 import { emptyView, viewKey } from '../shared/session';
+import { Store, taskSaveDelay } from '../electron/store';
 const require = createRequire(import.meta.url);
 test('main IPC creates linked runs, persists checkpoints before acknowledgement, validates references and gates rollback', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(),'jalo-ipc-'));
@@ -17,11 +18,20 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
   const syncHandlers = new Map<string,Function>();
   let saveSelection: any = { canceled: true }, saveCalls = 0, openError = '', about: any;
   const opened: string[] = [];
+  const originalFlush = Store.prototype.flush;
+  let flushes = 0, failWrites = false;
+  Store.prototype.flush = function () {
+    flushes++;
+    const db = (this as any).db, originalExport = db.export;
+    if (failWrites) db.export = () => { throw new Error('模拟磁盘写入失败'); };
+    try { return originalFlush.call(this); }
+    finally { db.export = originalExport; }
+  };
   const app=new EventEmitter() as any;
   Object.assign(app,{getVersion:()=> '9.8.7',isPackaged:false,getPath:(key:string)=>key==='userData'?userData:home,setPath:(_k:string,v:string)=>userData=v,setName:()=>{},setAboutPanelOptions:(value:any)=>about=value,requestSingleInstanceLock:()=>true,whenReady:()=>Promise.resolve(),quit:()=>{}});
   class Window extends EventEmitter {
     webContents:any; constructor(){super();window=this;this.webContents={mainFrame:{},send:()=>{},setWindowOpenHandler:()=>{},on:()=>{},session:{setPermissionRequestHandler:()=>{}}};} isDestroyed(){return false} async loadURL(){} }
-  const fake = {app,BrowserWindow:Window,dialog:{showOpenDialog:async()=>({canceled:false,filePaths:[root]}),showErrorBox:(_t:string,m:string)=>fatal=m},ipcMain:{handle:(n:string,h:Function)=>handlers.set(n,h)},Menu:{setApplicationMenu:()=>{},buildFromTemplate:()=>[]},safeStorage:{isEncryptionAvailable:()=>true},utilityProcess:{fork:()=>{const w=new EventEmitter() as any;w.sent=[];w.postMessage=(m:any)=>w.sent.push(m);w.kill=()=>{};workers.push(w);setImmediate(()=>w.emit('spawn'));return w;}}};
+  const fake = {app,BrowserWindow:Window,dialog:{showOpenDialog:async()=>({canceled:false,filePaths:[root]}),showErrorBox:(_t:string,m:string)=>fatal=m},ipcMain:{handle:(n:string,h:Function)=>handlers.set(n,h)},Menu:{setApplicationMenu:()=>{},buildFromTemplate:()=>[]},safeStorage:{isEncryptionAvailable:()=>true},utilityProcess:{fork:()=>{const w=new EventEmitter() as any;w.sent=[];w.postMessage=(m:any)=>w.sent.push(m);w.kill=()=>{w.killed=true;};workers.push(w);setImmediate(()=>w.emit('spawn'));return w;}}};
   Object.assign(fake,{shell:{openPath:async (directory:string)=>{opened.push(directory);return openError;}}});
   Object.assign(fake.ipcMain,{on:(name:string,handler:Function)=>syncHandlers.set(name,handler)});
   Object.assign(fake.dialog,{showSaveDialog:async()=>{saveCalls++;return saveSelection;}});
@@ -98,9 +108,12 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     worker.emit('message',{type:'approval-resolved',runId:run.id});
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'tool');
     const savedPlan='开头的完整约束\n'+'计划内容。'.repeat(3000)+'\n读取 a.txt，再将 old 改为 new，重新读取验收。';
+    const beforeEvents = flushes;
     worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'message',role:'assistant',text:'临时思路，不应成为执行计划'}});
     for(let i=0;i<605;i++)worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'notice',text:`历史记录 ${i}`}});
+    assert.equal(flushes,beforeEvents);
     worker.emit('message',{type:'done',runId:run.id,status:'completed',result:savedPlan,evidence:{successfulTools:['read_file'],changedFiles:[]}});
+    assert.equal(flushes,beforeEvents+1);
     const historyTask=(await snapshot()).tasks[0];assert.equal(historyTask.events.length,100);assert.ok(historyTask.eventCount>600);assert.equal(historyTask.runs[0].planText,savedPlan);
     await assert.rejects(invoke('task:events',{taskId:randomUUID()}),/任务不存在/);
     await assert.rejects(invoke('task:events',{taskId,before:'wrong-cursor'}),/游标不存在/);
@@ -152,5 +165,64 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     evaluationWorker.emit('message',{type:'evaluation-update',report:{...start.report,status:'cancelled'}});evaluationWorker.emit('exit',0);
     assert.equal((await snapshot()).evaluations[0].status,'cancelled');await assert.rejects(fs.access(start.home));
     await invoke('settings:save',{...defaults,model:'mock'});
-  } finally { Module._load=original;app.emit('before-quit');await fs.rm(home,{recursive:true,force:true}); }
+    // Saving failures must stop a worker before any successful checkpoint acknowledgement.
+    const failedId=await invoke('task:submit',{projectId:project.id,prompt:'checkpoint failure',mode:'execute'});
+    const failedTask=(await snapshot()).tasks.find((t:any)=>t.id===failedId), failedWorker=workers.at(-1);
+    const failedCheckpoint={...change,id:randomUUID(),runId:failedTask.currentRunId};
+    failWrites=true;failedWorker.emit('message',{type:'checkpoint',runId:failedTask.currentRunId,checkpoint:failedCheckpoint});
+    assert.ok(failedWorker.killed);
+    assert.ok(!failedWorker.sent.some((m:any)=>m.type==='checkpoint-ack'&&!m.error));
+    assert.equal((await snapshot()).tasks.find((t:any)=>t.id===failedId).status,'failed');
+    assert.equal(await fs.readFile(path.join(root,'a.txt'),'utf8'),'old');
+    failWrites=false;
+    await invoke('task:submit',{projectId:project.id,taskId:failedId,prompt:'手动检查后继续',mode:'execute'});
+    const resumed=(await snapshot()).tasks.find((t:any)=>t.id===failedId);
+    workers.at(-1).emit('message',{type:'done',runId:resumed.currentRunId,status:'completed'});
+    // A delayed failure also stops execution, and must not start the queued task.
+    const delayedId=await invoke('task:submit',{projectId:project.id,prompt:'deferred failure'});
+    const delayedTask=(await snapshot()).tasks.find((t:any)=>t.id===delayedId), delayedWorker=workers.at(-1);
+    const queuedId=await invoke('task:submit',{projectId:project.id,prompt:'stay queued'}), workerCount=workers.length;
+    failWrites=true;
+    delayedWorker.emit('message',{type:'progress',runId:delayedTask.currentRunId,progress:{phase:'generating',since:Date.now()}});
+    await new Promise(r=>setTimeout(r,taskSaveDelay+30));
+    assert.ok(delayedWorker.killed);assert.equal(workers.length,workerCount);
+    assert.match((await snapshot()).tasks.find((t:any)=>t.id===delayedId).error,/保存失败/);
+    assert.equal((await snapshot()).tasks.find((t:any)=>t.id===queuedId).status,'queued');
+    failWrites=false;await invoke('task:stop',queuedId);
+    // A user's approval must reach durable storage before the worker receives it.
+    const approvalTaskId=await invoke('task:submit',{projectId:project.id,prompt:'approval persistence'});
+    const approvalTask=(await snapshot()).tasks.find((t:any)=>t.id===approvalTaskId), approvalWorker=workers.at(-1), approvalId=randomUUID();
+    approvalWorker.emit('message',{type:'approval',runId:approvalTask.currentRunId,approval:{id:approvalId,command:'node --version',cwd:root,timeout:1}});
+    failWrites=true;
+    await assert.rejects(invoke('task:approve',{taskId:approvalTaskId,approvalId,allow:true}),/磁盘写入失败/);
+    assert.ok(approvalWorker.killed);assert.ok(!approvalWorker.sent.some((m:any)=>m.type==='approve'));
+    assert.equal((await snapshot()).tasks.find((t:any)=>t.id===approvalTaskId).status,'failed');
+    failWrites=false;
+    await invoke('task:submit',{projectId:project.id,taskId:approvalTaskId,prompt:'检查后手动继续'});
+    const last=(await snapshot()).tasks.find((t:any)=>t.id===approvalTaskId);
+    workers.at(-1).emit('message',{type:'done',runId:last.currentRunId,status:'completed'});
+    // A synchronous metadata save must notify the pending worker, too.
+    const renameId=await invoke('task:submit',{projectId:project.id,prompt:'rename during deferred save'});
+    const renameTask=(await snapshot()).tasks.find((t:any)=>t.id===renameId), renameWorker=workers.at(-1);
+    const waitingId=await invoke('task:submit',{projectId:project.id,prompt:'wait for storage recovery'}), beforeFailure=workers.length;
+    renameWorker.emit('message',{type:'event',runId:renameTask.currentRunId,event:{id:randomUUID(),at:Date.now(),kind:'notice',text:'pending history'}});
+    const blocked=path.join(userData,'local-code.sqlite.tmp');
+    await fs.mkdir(blocked);
+    try {
+      await assert.rejects(invoke('task:rename',{taskId:renameId,title:'renamed during save'}),/EISDIR/);
+      assert.ok(renameWorker.killed);
+      const stopped=(await snapshot()).tasks.find((t:any)=>t.id===renameId);
+      assert.equal(stopped.status,'failed'); assert.match(stopped.error,/保存失败/);
+      assert.equal((await snapshot()).activeId,undefined);
+      await new Promise(r=>setTimeout(r,taskSaveDelay+30));
+      assert.equal(workers.length,beforeFailure);
+      assert.equal((await snapshot()).tasks.find((t:any)=>t.id===waitingId).status,'queued');
+    } finally { await fs.rm(blocked,{recursive:true,force:true}); }
+    await invoke('task:stop',waitingId);
+    await invoke('task:submit',{projectId:project.id,taskId:renameId,prompt:'storage recovered; continue manually'});
+    const retried=(await snapshot()).tasks.find((t:any)=>t.id===renameId);
+    assert.equal(retried.status,'running'); assert.equal(workers.length,beforeFailure+1);
+    assert.equal(retried.events.filter((e:any)=>e.text==='pending history').length,1);
+    workers.at(-1).emit('message',{type:'done',runId:retried.currentRunId,status:'completed'});
+  } finally { failWrites=false;Store.prototype.flush=originalFlush;Module._load=original;app.emit('before-quit');await fs.rm(home,{recursive:true,force:true}); }
 });

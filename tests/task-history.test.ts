@@ -46,7 +46,7 @@ test('legacy requests remain searchable after continuation, pagination and reope
     legacy.events.push({ id: 'new-user', at: 2, kind: 'message', role: 'user', runId: 'new-run', text: '继续处理导出' });
     check(legacy);
     assert.equal(filterTasks([taskHistorySnapshot(legacy)], 'p', false, '导出').length, 1);
-    store.putTask(legacy); store.close(); store = undefined;
+    store.putTask(legacy, legacy.currentRunId); store.close(); store = undefined;
     store = await Store.open(file); check(store.tasks()[0]);
   } finally { store?.close(); await fs.rm(home, { recursive: true, force: true }); }
 });

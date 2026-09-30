@@ -34,7 +34,7 @@ const developmentUrl = app.isPackaged ? undefined : process.env.LOCAL_CODE_DEV_U
 let win: BrowserWindow | undefined, store: Store;
 let tasks: Task[] = [];
 let active: { task: Task; worker: UtilityProcess; timer?: ReturnType<typeof setTimeout>; pids: Set<number> } | undefined;
-let modelOperation = false, quitting = false;
+let modelOperation = false, quitting = false, storageFailed = false;
 let session: SessionStore;
 let closingProjectIds: string[] = [];
 let evaluation: EvaluationController;
@@ -55,7 +55,26 @@ function settings(): Settings {
 }
 function snapshot(): Snapshot { return { projects: store.projects(), tasks: tasks.map(taskHistorySnapshot), settings: settings(), activeId: active?.task.id, evaluations: evaluation?.reports() || [] }; }
 function broadcast() { if (win && !win.isDestroyed()) win.webContents.send('app:update', snapshot()); }
-function persist(task: Task) { syncRun(task); store.putTask(task); broadcast(); }
+function storageFailure(task: Task, error: unknown) {
+  storageFailed = true;
+  diagnostics.record({ event: 'ipc_error', errorCategory: errorCategory(error) });
+  if (active?.task.id === task.id) {
+    const previous = active; active = undefined;
+    clearTimeout(previous.timer); killProcesses(previous.pids); previous.worker.kill();
+  }
+  configs.delete(task.id); task.approval = undefined; task.status = 'failed';
+  task.error = '任务记录保存失败，已停止执行。请检查磁盘空间和数据目录权限后重试。';
+  syncRun(task); broadcast();
+}
+function persist(task: Task, durability: 'immediate' | 'deferred' = 'immediate', runId = task.currentRunId) {
+  syncRun(task);
+  if (durability === 'deferred') store.deferTask(task, runId, error => storageFailure(task, error));
+  else {
+    try { store.putTask(task, runId); storageFailed = false; }
+    catch (error) { storageFailure(task, error); throw error; }
+  }
+  broadcast();
+}
 function idleRequired() { if (evaluation?.busy) throw new Error('模型能力实测正在运行，请先停止或完成实测'); if (modelOperation || tasks.some(t => busyStatuses.includes(t.status))) throw new Error('请先停止或完成运行中和排队中的任务，再调整模型或设置'); }
 function killProcesses(pids: Set<number>) { for (const pid of pids) { try { process.kill(-pid, 'SIGKILL'); } catch {} } }
 function finish(task: Task, status: Task['status'], error?: string) {
@@ -65,14 +84,15 @@ function finish(task: Task, status: Task['status'], error?: string) {
   task.status = status; task.error = error; task.approval = undefined;
   diagnostics.record({ event: 'task_finished', taskId: task.id, runId: task.currentRunId, status, ...(error ? { errorCategory: errorCategory(error) } : {}) });
   active = undefined; configs.delete(task.id); previous.worker.kill();
-  persist(task); setImmediate(pump);
+  try { persist(task); } catch { return; }
+  setImmediate(pump);
 }
 function pump() {
-  if (active || modelOperation || evaluation?.busy || quitting) return;
+  if (active || modelOperation || evaluation?.busy || quitting || storageFailed) return;
   const task = tasks.filter(t => t.status === 'queued').sort((a, b) => (a.queuedAt || a.createdAt) - (b.queuedAt || b.createdAt))[0];
   if (!task) return;
   const project = store.projects().find(p => p.id === task.projectId);
-  if (!project) { task.status = 'failed'; task.error = '项目不存在'; persist(task); setImmediate(pump); return; }
+  if (!project) { task.status = 'failed'; task.error = '项目不存在'; try { persist(task); } catch { return; } setImmediate(pump); return; }
   try {
     task.status = 'running'; task.error = undefined;
     progress(task, 'preparing');
@@ -81,42 +101,49 @@ function pump() {
     diagnostics.record({ event: 'task_started', taskId: task.id, runId: task.currentRunId });
     worker.on('message', (event: EngineEvent) => {
       if (active?.worker !== worker || quitting || event.runId !== task.currentRunId) return;
-      const run = currentRun(task);
-      if (event.type === 'context') { if (run) { run.contextUsage = event.usage; persist(task); } return; }
-      if (event.type === 'progress') {
-        if (run && run.progress?.phase !== 'stopping' && !task.approval) {
-          run.progress = event.progress; persist(task);
-          diagnostics.record({ event: 'task_phase', taskId: task.id, runId: run.id, phase: event.progress.phase, step: event.progress.step, tool: event.progress.tool });
+      try {
+        const run = currentRun(task);
+        if (event.type === 'context') { if (run) { run.contextUsage = event.usage; persist(task, 'deferred'); } return; }
+        if (event.type === 'progress') {
+          if (run && run.progress?.phase !== 'stopping' && !task.approval) {
+            run.progress = event.progress; persist(task, 'deferred');
+            diagnostics.record({ event: 'task_phase', taskId: task.id, runId: run.id, phase: event.progress.phase, step: event.progress.step, tool: event.progress.tool });
+          }
+          return;
         }
-        return;
-      }
-      if (event.type === 'checkpoint') {
-        if (!run || run.mode !== 'execute' || event.checkpoint.runId !== run.id) return;
-        const index = run.changes.findIndex(c => c.path === event.checkpoint.path);
-        if (index < 0) run.changes.push(event.checkpoint); else run.changes[index] = event.checkpoint;
-        try { persist(task); worker.postMessage({ type: 'checkpoint-ack', id: event.checkpoint.id }); }
-        catch (e) { diagnostics.record({ event: 'checkpoint_error', taskId: task.id, runId: run.id, errorCategory: errorCategory(e) }); worker.postMessage({ type: 'checkpoint-ack', id: event.checkpoint.id, error: '检查点保存失败，禁止写入' }); }
-        return;
-      }
-      if (event.type === 'check' && run) run.checks.push(event.check);
-      if (event.type === 'process') { if (event.running) { active.pids.add(event.pid); if (run?.progress?.phase !== 'stopping') { progress(task, 'command'); persist(task); } } else active.pids.delete(event.pid); return; }
-      if (event.type === 'delta') { win?.webContents.send('task:delta', { taskId: task.id, text: event.text }); return; }
-      if (event.type === 'messages') task.messages = event.messages;
-      if (event.type === 'event') { task.events.push(event.event); if (event.event.kind === 'error') diagnostics.record({ event: 'tool_error', taskId: task.id, runId: task.currentRunId, errorCategory: errorCategory(event.event.text) }); }
-      if (event.type === 'change') { if (run && event.checkpoint) { const i = run.changes.findIndex(c => c.path === event.checkpoint!.path); if (i < 0) run.changes.push(event.checkpoint); else run.changes[i] = event.checkpoint; } const index = task.changes.findIndex(c => c.path === event.change.path); if (index < 0) task.changes.push(event.change); else task.changes[index] = event.change; }
-      if (event.type === 'approval') { if (run?.progress?.phase === 'stopping') return; task.approval = event.approval; task.status = 'waiting'; progress(task, 'approval'); }
-      if (event.type === 'approval-resolved') { task.approval = undefined; task.status = 'running'; if (run?.progress?.phase !== 'stopping') progress(task, 'tool'); }
-      if (event.type === 'done') { if (run?.mode === 'plan' && event.status === 'completed' && event.result?.trim()) run.planText = event.result; task.lastRun = event.evidence; finish(task, event.status, event.error); return; }
-      persist(task);
+        if (event.type === 'checkpoint') {
+          if (!run || run.mode !== 'execute' || event.checkpoint.runId !== run.id) return;
+          const index = run.changes.findIndex(c => c.path === event.checkpoint.path);
+          if (index < 0) run.changes.push(event.checkpoint); else run.changes[index] = event.checkpoint;
+          try { persist(task); worker.postMessage({ type: 'checkpoint-ack', id: event.checkpoint.id }); }
+          catch (e) { diagnostics.record({ event: 'checkpoint_error', taskId: task.id, runId: run.id, errorCategory: errorCategory(e) }); worker.postMessage({ type: 'checkpoint-ack', id: event.checkpoint.id, error: '检查点保存失败，禁止写入' }); }
+          return;
+        }
+        if (event.type === 'check' && run) run.checks.push(event.check);
+        if (event.type === 'process') { if (event.running) { active.pids.add(event.pid); if (run?.progress?.phase !== 'stopping') { progress(task, 'command'); persist(task, 'deferred'); } } else active.pids.delete(event.pid); return; }
+        if (event.type === 'delta') { win?.webContents.send('task:delta', { taskId: task.id, text: event.text }); return; }
+        if (event.type === 'messages') task.messages = event.messages;
+        if (event.type === 'event') { task.events.push(event.event); if (event.event.kind === 'error') diagnostics.record({ event: 'tool_error', taskId: task.id, runId: task.currentRunId, errorCategory: errorCategory(event.event.text) }); }
+        if (event.type === 'change') { if (run && event.checkpoint) { const i = run.changes.findIndex(c => c.path === event.checkpoint!.path); if (i < 0) run.changes.push(event.checkpoint); else run.changes[i] = event.checkpoint; } const index = task.changes.findIndex(c => c.path === event.change.path); if (index < 0) task.changes.push(event.change); else task.changes[index] = event.change; }
+        if (event.type === 'approval') { if (run?.progress?.phase === 'stopping') return; task.approval = event.approval; task.status = 'waiting'; progress(task, 'approval'); }
+        if (event.type === 'approval-resolved') { task.approval = undefined; task.status = 'running'; if (run?.progress?.phase !== 'stopping') progress(task, 'tool'); }
+        if (event.type === 'done') { if (run?.mode === 'plan' && event.status === 'completed' && event.result?.trim()) run.planText = event.result; task.lastRun = event.evidence; finish(task, event.status, event.error); return; }
+        persist(task, ['change', 'approval', 'approval-resolved'].includes(event.type) ? 'immediate' : 'deferred');
+      } catch (error) { storageFailure(task, error); }
     });
     let stderr = '';
     worker.stderr?.on('data', data => { stderr = (stderr + data.toString()).slice(-3000); });
     worker.on('exit', code => { if (active?.worker === worker) { diagnostics.record({ event: 'worker_exit', taskId: task.id, runId: task.currentRunId, exitCode: code }); finish(task, 'interrupted', `任务进程意外退出（${code}）。${stderr.slice(-500)} 请检查修改后手动继续。`); } });
-    worker.on('spawn', () => worker.postMessage({ type: 'start', task, root: project.path, backupDir: path.join(app.getPath('userData'), 'backups', task.id), settings: configs.get(task.id) || settings() }));
+    worker.on('spawn', () => {
+      if (active?.worker !== worker || quitting) return;
+      try { worker.postMessage({ type: 'start', task, root: project.path, backupDir: path.join(app.getPath('userData'), 'backups', task.id), settings: configs.get(task.id) || settings() }); }
+      catch (error) { finish(task, 'failed', (error as Error).message); }
+    });
     persist(task);
   } catch (error) {
+    if (storageFailed) return;
     if (active?.task.id === task.id) finish(task, 'failed', (error as Error).message);
-    else { task.status = 'failed'; task.error = (error as Error).message; persist(task); setImmediate(pump); }
+    else { task.status = 'failed'; task.error = (error as Error).message; try { persist(task); } catch { return; } setImmediate(pump); }
   }
 }
 function register(channel: string, handler: (...args: any[]) => unknown) {
@@ -258,7 +285,7 @@ function registerApi() {
       task.events.push({ id: randomUUID(), at: Date.now(), kind: 'notice', text, runId: run.id });
       task.messages.push({ role: 'user', content: text });
       if (task.lastRun && task.currentRunId === run.id) task.lastRun.changedFiles = run.changes.filter(c => c.state === 'written' && c.before !== c.after).map(c => c.path);
-      persist(task);
+      persist(task, 'immediate', run.id);
     } finally { projectLocks.delete(task.projectId); }
   });
   register('task:submit', async (raw: unknown) => {
@@ -316,7 +343,9 @@ function registerApi() {
     if (!active || active.task.id !== value.taskId || active.task.approval?.id !== value.approvalId) throw new Error('命令确认已过期');
     active.task.approval = undefined; active.task.status = 'running';
     if (currentRun(active.task)?.progress?.phase !== 'stopping') progress(active.task, 'tool');
-    active.worker.postMessage({ type: 'approve', id: value.approvalId, allow: value.allow }); persist(active.task);
+    const worker = active.worker;
+    persist(active.task);
+    worker.postMessage({ type: 'approve', id: value.approvalId, allow: value.allow });
   });
 }
 async function createWindow() {
@@ -355,6 +384,9 @@ else {
     diagnostics.record({ event: 'app_quit' });
     evaluation?.shutdown();
     if (active) { clearTimeout(active.timer); killProcesses(active.pids); active.worker.kill(); }
-    if (store) { for (const task of tasks.filter(t => busyStatuses.includes(t.status))) { task.status = 'interrupted'; task.approval = undefined; task.error = '应用已退出，请检查修改后手动继续。'; syncRun(task); store.putTask(task); } store.close(); }
+    if (store) {
+      try { for (const task of tasks.filter(t => busyStatuses.includes(t.status))) { task.status = 'interrupted'; task.approval = undefined; task.error = '应用已退出，请检查修改后手动继续。'; syncRun(task); store.deferTask(task, task.currentRunId); } store.close(); }
+      catch (error) { diagnostics.record({ event: 'ipc_error', errorCategory: errorCategory(error) }); dialog.showErrorBox('任务记录保存失败', '退出前未能保存最后的任务记录，请检查磁盘空间和数据目录权限。'); }
+    }
   });
 }
