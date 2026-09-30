@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('localCode', Object.freeze({
   removeProject: projectId => ipcRenderer.invoke('project:remove', projectId),
   renameTask: (taskId, title) => ipcRenderer.invoke('task:rename', { taskId, title }),
   archiveTask: (taskId, archived) => ipcRenderer.invoke('task:archive', { taskId, archived }),
+  taskEvents: input => ipcRenderer.invoke('task:events', input),
   saveSettings: settings => ipcRenderer.invoke('settings:save', settings),
   models: () => ipcRenderer.invoke('models:list'),
   loadModel: key => ipcRenderer.invoke('models:load', key),

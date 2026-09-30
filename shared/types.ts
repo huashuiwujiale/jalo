@@ -26,15 +26,17 @@ export interface CapturedReference extends FileReference { content: string }
 export interface FilePage { path: string; version: string; totalLines: number; startLine: number; endLine: number; content: string; hasMore: boolean }
 export interface CheckResult { path: string; status: 'passed' | 'failed' | 'skipped'; parser: string; message: string; at: number; version: string }
 export interface RunChange extends Change { id: string; runId: string; beforeVersion: string | null; afterVersion: string; check: CheckResult; state: 'prepared' | 'written' | 'reverted' | 'uncertain'; revertedAt?: number }
-export interface Run { id: string; taskId: string; mode: Mode; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
+export interface Run { id: string; taskId: string; mode: Mode; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planText?: string; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
 export interface SubmitInput { projectId: string; prompt: string; taskId?: string; mode?: Mode; references?: FileReference[]; planRunId?: string; reviewRunId?: string }
 export interface RollbackPreview { token: string; patch: string; path: string; createsRecoveryCopy: boolean }
 export interface Change { path: string; before: string | null; after: string; patch: string }
 export interface Approval { id: string; command: string; cwd: string; timeout: number }
 export interface Event { id: string; at: number; kind: 'message' | 'tool' | 'output' | 'notice' | 'error'; text: string; role?: string; runId?: string; toolCallId?: string; toolPhase?: 'call' | 'result' | 'error' }
+export interface EventPage { events: Event[]; start: number; hasMore: boolean; total: number }
 export interface RunEvidence { successfulTools: string[]; changedFiles: string[] }
 export interface Task {
   archivedAt?: number;
+  eventCount?: number; historyIncomplete?: boolean; userRequests?: string[];
   id: string; projectId: string; title: string; model: string; status: Status; createdAt: number; queuedAt?: number;
   messages: Message[]; events: Event[]; changes: Change[]; approval?: Approval; error?: string; lastRun?: RunEvidence; mode?: Mode; runs?: Run[]; currentRunId?: string; legacy?: boolean;
 }
@@ -56,7 +58,7 @@ export type EngineEvent = (
   | { type: 'change'; change: Change; checkpoint?: RunChange }
   | { type: 'approval'; approval: Approval }
   | { type: 'approval-resolved' }
-  | { type: 'done'; status: Status; error?: string; evidence?: RunEvidence }) & { runId?: string };
+  | { type: 'done'; status: Status; error?: string; evidence?: RunEvidence; result?: string }) & { runId?: string };
 export interface Api {
   loadSession(): Promise<{ state: import('./session').SessionState; warning?: string }>;
   saveView(view: import('./session').SessionView): Promise<void>;
@@ -71,6 +73,7 @@ export interface Api {
   removeProject(projectId: string): Promise<void>;
   renameTask(taskId: string, title: string): Promise<void>;
   archiveTask(taskId: string, archived: boolean): Promise<void>;
+  taskEvents(input: { taskId: string; before?: string }): Promise<EventPage>;
   saveSettings(settings: Settings): Promise<void>;
   models(): Promise<LocalModel[]>;
   loadModel(key: string): Promise<void>;

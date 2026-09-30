@@ -10,9 +10,14 @@ export function capturePosition(element: HTMLElement | null, follow: boolean): P
 }
 export function restorePosition(element: HTMLElement, saved: Position) {
   const entries=Array.from(element.querySelectorAll<HTMLElement>('[data-event-id]'));
-  for(const node of entries)if(node instanceof HTMLDetailsElement)node.open=saved.expanded.includes(node.dataset.eventId!);
+  // Loading the preceding page can turn a standalone result into its tool card.
+  const ids = (node: HTMLElement): string[] => {
+    try { const aliases = JSON.parse(node.dataset.eventAliases || '[]'); return [node.dataset.eventId!, ...(Array.isArray(aliases) ? aliases.filter(id => typeof id === 'string') : [])]; }
+    catch { return [node.dataset.eventId!]; }
+  };
+  for(const node of entries)if(node instanceof HTMLDetailsElement)node.open=ids(node).some(id => saved.expanded.includes(id));
   const bottom=Math.max(0,element.scrollHeight-element.clientHeight);
-  const anchor=entries.find(node=>node.dataset.eventId===saved.anchor);
+  const anchor=entries.find(node=>ids(node).includes(saved.anchor || ''));
   const target=saved.follow ? bottom : anchor && saved.offset!==undefined ? element.scrollTop+anchor.getBoundingClientRect().top-element.getBoundingClientRect().top-saved.offset : saved.top;
   element.scrollTop=Math.max(0,Math.min(bottom,target));
   return element.scrollTop;

@@ -12,7 +12,7 @@ export function ToolCard({ group, active, waiting }: { group: ToolGroup; active:
   const deferred = result?.includes('尚未执行操作。');
   const status = failed ? '未成功' : denied ? '已拒绝' : deferred ? '未执行' : group.result ? '已返回' : active ? waiting && group.name === 'run_command' ? '等待确认' : '执行中' : '未收到结果';
   const errorText = group.errors.map(e => e.text).filter(text => !result?.includes(text));
-  return <details data-event-id={group.id} className={`tool-event tool-card ${failed ? 'error' : ''}`}>
+  return <details data-event-id={group.id} data-event-aliases={JSON.stringify([group.result?.id, ...group.errors.map(e => e.id)].filter(Boolean))} className={`tool-event tool-card ${failed ? 'error' : ''}`}>
     <summary><Terminal size={14}/><strong>{labels[group.name] || group.name}</strong><span className="tool-target" title={target}>{target}</span><small>{status}</small><ChevronDown size={12}/></summary>
     {failed && <p className="tool-card-error">{(group.errors[0]?.text || result || '').split('\n')[0].slice(0, 200)}</p>}
     <div className="tool-card-body"><h4>调用参数 · {group.name}</h4><pre>{parameters || '无参数'}</pre>

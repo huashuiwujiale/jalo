@@ -97,8 +97,18 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'approval');
     worker.emit('message',{type:'approval-resolved',runId:run.id});
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'tool');
-    worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'message',role:'assistant',text:'读取 a.txt，再将 old 改为 new，重新读取验收。'}});
-    worker.emit('message',{type:'done',runId:run.id,status:'completed',evidence:{successfulTools:['read_file'],changedFiles:[]}});
+    const savedPlan='开头的完整约束\n'+'计划内容。'.repeat(3000)+'\n读取 a.txt，再将 old 改为 new，重新读取验收。';
+    worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'message',role:'assistant',text:'临时思路，不应成为执行计划'}});
+    for(let i=0;i<605;i++)worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'notice',text:`历史记录 ${i}`}});
+    worker.emit('message',{type:'done',runId:run.id,status:'completed',result:savedPlan,evidence:{successfulTools:['read_file'],changedFiles:[]}});
+    const historyTask=(await snapshot()).tasks[0];assert.equal(historyTask.events.length,100);assert.ok(historyTask.eventCount>600);assert.equal(historyTask.runs[0].planText,savedPlan);
+    await assert.rejects(invoke('task:events',{taskId:randomUUID()}),/任务不存在/);
+    await assert.rejects(invoke('task:events',{taskId,before:'wrong-cursor'}),/游标不存在/);
+    await assert.rejects(invoke('task:events',{taskId,extra:true}));
+    await assert.rejects(handlers.get('task:events')!({sender:{},senderFrame:{}},{taskId}),/无效的调用来源/);
+    let historyPage=await invoke('task:events',{taskId}), loadedEvents=historyPage.events;
+    while(historyPage.hasMore){historyPage=await invoke('task:events',{taskId,before:historyPage.events[0].id});loadedEvents=[...historyPage.events,...loadedEvents];}
+    assert.equal(loadedEvents.length,historyTask.eventCount);assert.equal(loadedEvents[0].role,'user');
     assert.ok((await snapshot()).tasks[0].runs[0].progress.endedAt);
     await invoke('task:archive',{taskId,archived:true});
     const archived=(await snapshot()).tasks[0];assert.ok(archived.archivedAt);assert.equal(archived.runs[0].status,'completed');
@@ -106,6 +116,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await invoke('task:archive',{taskId,archived:false});assert.equal((await snapshot()).tasks[0].archivedAt,undefined);
     await invoke('task:submit',{projectId:project.id,taskId,prompt:'执行计划',mode:'execute',planRunId:run.id});
     task=(await snapshot()).tasks[0];const second=task.runs.at(-1);assert.notEqual(second.id,run.id);assert.equal(second.planRunId,run.id);
+    assert.ok(task.messages.at(-1).content.includes(savedPlan));assert.ok(!task.messages.at(-1).content.includes('临时思路'));
     const w=workers.at(-1), change={id:randomUUID(),runId:second.id,path:'a.txt',before:'old',after:'new',beforeVersion:version('old'),afterVersion:version('new'),check:checkSyntax('a.txt','new'),state:'prepared',patch:'-old\n+new'};
     w.emit('message',{type:'checkpoint',runId:second.id,checkpoint:change});
     assert.ok(w.sent.some((m:any)=>m.type==='checkpoint-ack'&&m.id===change.id));

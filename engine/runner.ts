@@ -108,7 +108,7 @@ export class TaskRunner {
           const evidence = this.tools.evidence();
           this.notice(evidence.changedFiles.length ? `本轮文件工具实际修改 ${evidence.changedFiles.length} 个文件：${evidence.changedFiles.join('、')}。请检查差异确认结果。` : '本轮回复已结束，文件工具未产生实际修改。');
           this.emit({ type: 'messages', messages });
-          this.emit({ type: 'done', status: 'completed', evidence }); return;
+          this.emit({ type: 'done', status: 'completed', evidence, result: assistant.content || '' }); return;
         }
         let haltReason: string | undefined;
         for (const call of calls) {

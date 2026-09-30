@@ -149,3 +149,4 @@ button:disabled { cursor:not-allowed;opacity:.5; }
 .context-usage progress { width:100%; height:6px; accent-color:#497563; margin-top:8px; }
 .context-usage p { margin:6px 0; line-height:1.6; }
 .context-usage small { opacity:.7; }
+.history-pagination{display:flex;flex-direction:column;align-items:center;gap:8px;margin:8px 0 16px}.history-pagination:empty{display:none}.history-pagination p{font-size:11px;color:#9299a3;line-height:1.6;margin:0}.saved-plan{margin:16px 0}.saved-plan details{margin-bottom:12px}.saved-plan summary{cursor:pointer;color:#587566}.saved-plan pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.8;max-height:360px;overflow:auto;padding:12px;background:#f0f2f4;border-radius:8px}

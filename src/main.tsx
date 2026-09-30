@@ -16,6 +16,8 @@ import { AppMaintenance } from './app-maintenance';
 import { ModelEvaluation } from './model-evaluation';
 import { emptySession, emptyView, rememberView, restoreView, viewKey, type SessionView } from '../shared/session';
 import { capturePosition, restorePosition } from './session-scroll';
+import { useEventHistory } from './event-history';
+import { HistoryControls, PlanActions } from './history-controls';
 declare global { interface Window { localCode: Api } }
 const statusText: Record<Task['status'], string> = { queued: '排队中', running: '执行中', waiting: '等待确认', completed: '本轮结束', failed: '执行失败', cancelled: '已停止', interrupted: '已中断' };
 const api = window.localCode;
@@ -80,19 +82,22 @@ function App() {
   };
   const project = state.projects.find(p => p.id === projectId);
   const task = state.tasks.find(t => t.id === taskId);
+  const fail = (e: unknown) => setError((e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': Error: /, ''));
+  const history = useEventHistory(task, api, pendingPosition.current?.follow === false ? pendingPosition.current.anchor : undefined, () => {
+    if (!pendingPosition.current) { pendingPosition.current = capturePosition(conversation.current, followLatest.current); setViewRevision(n => n + 1); }
+  }, e => fail(e));
   const isBusy = !!task && busyStatuses.includes(task.status);
   const evaluating = state.evaluations?.some(r => r.status === 'running');
   const composerLocked = isBusy || !!task?.archivedAt;
   const run = task?.runs?.find(r => r.id === runId) || task?.runs?.at(-1);
   const invalidReferences = references.some(r => r.projectId !== projectId);
   const projectBusy = state.tasks.some(t => t.projectId === projectId && busyStatuses.includes(t.status));
-  const fail = (e: unknown) => setError((e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': Error: /, ''));
   function persistView(view: SessionView) {
     rememberView(sessions.current, view);
     void api.saveView(view).catch(fail);
   }
   function rememberCurrent() {
-    if (!sessionReady) return;
+    if (!sessionReady || pendingPosition.current) return;
     const view = { ...currentView.current, scroll: capturePosition(conversation.current, followLatest.current) };
     currentView.current = view; persistView(view);
   }
@@ -118,30 +123,30 @@ function App() {
   }, []);
   useLayoutEffect(() => {
     const element=conversation.current, saved=pendingPosition.current;
-    if (!sessionReady || !element || !saved) return;
+    if (!sessionReady || !element || !saved || history.restoring) return;
     pendingPosition.current=undefined; followLatest.current=saved.follow;
     previousScrollTop.current=restorePosition(element,saved);restoredTop.current=element.scrollTop;
     setShowLatest(!saved.follow);
-  }, [sessionReady, viewRevision]);
+  }, [sessionReady, viewRevision, history.restoring, history.events.length]);
   useLayoutEffect(() => {
     if (!sessionReady) return;
-    currentView.current = { projectId,taskId,prompt,mode,references,runId,tab,scroll:capturePosition(conversation.current,followLatest.current) };
+    currentView.current = { projectId,taskId,prompt,mode,references,runId,tab,scroll:pendingPosition.current || capturePosition(conversation.current,followLatest.current) };
     persistView(currentView.current);
   }, [sessionReady,viewRevision,projectId,taskId,prompt,mode,references,runId,tab]);
   useEffect(() => {
     if (!sessionReady) return;
-    const flush = () => { api.flushView({ ...currentView.current, scroll:capturePosition(conversation.current,followLatest.current) }); };
+    const flush = () => { api.flushView({ ...currentView.current, scroll:pendingPosition.current || capturePosition(conversation.current,followLatest.current) }); };
     window.addEventListener('beforeunload',flush);
     return () => window.removeEventListener('beforeunload',flush);
   },[sessionReady]);
   useLayoutEffect(() => {
-    if (followLatest.current) scrollToLatest();
+    if (followLatest.current && !pendingPosition.current) scrollToLatest();
   }, [task?.events.length, task?.events.at(-1)?.id, streams[taskId], task?.approval?.id, task?.status]);
   useEffect(() => {
     const element = conversation.current;
     if (!element) return;
     const observer = new ResizeObserver(() => {
-      if (followLatest.current) scrollToLatest();
+      if (followLatest.current && !pendingPosition.current) scrollToLatest();
     });
     observer.observe(element);
     if (element.firstElementChild) observer.observe(element.firstElementChild);
@@ -191,7 +196,8 @@ function App() {
         {!task ? <section className="welcome"><div className="welcome-icon"><Code2 size={31}/><span/></div><div className="eyebrow">YOUR LOCAL WORKSPACE</div><h1>把想法，变成代码。</h1><p>连接你自己的模型，在熟悉的项目里开始工作。<br/>从理解代码到完成修改，每一步都清晰可见。</p><div className="suggestions">
           {[{ icon: Folder, title: '了解这个项目', text: '阅读项目结构和 AGENTS.md，介绍技术栈、主要模块与启动方式。暂不修改文件。' }, { icon: Code2, title: '检查一段实现', text: '检查项目的主要入口与核心逻辑，找出一个有明确证据的问题，先说明原因和修改建议。' }, { icon: GitBranch, title: '开始一个改动', text: '我想在这个项目中实现一个功能：' }].map(item => <button key={item.title} onClick={() => setPrompt(item.text)}><item.icon size={18}/><span>{item.title}</span><ArrowRight size={15}/></button>)}
           </div><div className="welcome-foot"><ShieldCheck size={14}/>项目内自动编辑 · 终端命令逐次确认</div></section> : <div className="timeline"><div className="task-heading"><span className={`status-tag ${task.status}`}>{statusText[task.status]}</span><span>{new Date(task.createdAt).toLocaleString('zh-CN')}</span></div>
-          {groupToolEvents(task.events).map(e => e.kind === 'tool-group' ? <ToolCard key={e.id} group={e} active={busyStatuses.includes(task.status) && (!e.call.runId || e.call.runId === task.currentRunId)} waiting={task.status === 'waiting'}/> : e.kind === 'message' ? <article key={e.id} data-event-id={e.id} className={`message ${e.role}`}><div className="message-author">{e.role === 'user' ? <span className="avatar user-avatar">你</span> : <span className="avatar assistant-avatar"><Code2 size={15}/></span>}<strong>{e.role === 'user' ? '你' : 'Jalo'}</strong></div><div className="message-text">{e.text}</div></article> : e.kind === 'output' ? null : e.kind === 'notice' ? <div key={e.id} data-event-id={e.id} className="progress-line"><span/>{e.text}</div> : <details key={e.id} data-event-id={e.id} className={`tool-event ${e.kind}`}><summary><Terminal size={13}/><span>{e.text.split('\n')[0].slice(0, 150)}</span><ChevronDown size={12}/></summary><pre>{e.text}</pre></details>)}
+          <HistoryControls hasMore={history.hasMore} loading={history.loading} incomplete={task.historyIncomplete} load={() => { pauseFollowing(); void history.loadEarlier(); }}/>
+          {groupToolEvents(history.events).map(e => e.kind === 'tool-group' ? <ToolCard key={e.id} group={e} active={busyStatuses.includes(task.status) && (!e.call.runId || e.call.runId === task.currentRunId)} waiting={task.status === 'waiting'}/> : e.kind === 'message' ? <article key={e.id} data-event-id={e.id} className={`message ${e.role}`}><div className="message-author">{e.role === 'user' ? <span className="avatar user-avatar">你</span> : <span className="avatar assistant-avatar"><Code2 size={15}/></span>}<strong>{e.role === 'user' ? '你' : 'Jalo'}</strong></div><div className="message-text">{e.text}</div></article> : e.kind === 'output' ? null : e.kind === 'notice' ? <div key={e.id} data-event-id={e.id} className="progress-line"><span/>{e.text}</div> : <details key={e.id} data-event-id={e.id} className={`tool-event ${e.kind}`}><summary><Terminal size={13}/><span>{e.text.split('\n')[0].slice(0, 150)}</span><ChevronDown size={12}/></summary><pre>{e.text}</pre></details>)}
           {streams[taskId] && <article className="message assistant"><div className="message-author"><span className="avatar assistant-avatar"><Code2 size={15}/></span><strong>Jalo</strong><LoaderCircle className="spin" size={13}/></div><div className="message-text">{streams[taskId]}<span className="cursor"/></div></article>}
           <RecoveryPanel task={task} disabled={sending || composerLocked} resume={() => {
             const latest = task.runs?.find(r => r.id === task.currentRunId) || task.runs?.at(-1);
@@ -201,7 +207,7 @@ function App() {
             document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus();
           }} inspect={() => { setTab('changes'); setRunId(task.currentRunId || ''); }} settings={() => setSettingsOpen(true)}/>
           {task.legacy && <p className="inspector-note">历史数据，缺少轮次核验。</p>}
-          {run && !busyStatuses.includes(run.status) && <><RunResult run={run}/>{run.mode === 'plan' && run.status === 'completed' && <button className="primary" disabled={sending || projectBusy || !!task.archivedAt} onClick={() => submit(run.id)}>按计划执行</button>}</>}
+          {run && !busyStatuses.includes(run.status) && <><RunResult run={run}/><PlanActions run={run} disabled={sending || projectBusy || !!task.archivedAt} execute={() => void submit(run.id)}/></>}
 
           </div>}
       </div>
@@ -223,7 +229,7 @@ function App() {
       </div>
     </main>
     <aside className="inspector"><header><span>任务工作区</span><span className="inspector-counter">{task?.changes.length || 0} 个文件</span></header><div className="inspector-tabs"><button className={tab === 'changes' ? 'active' : ''} onClick={() => setTab('changes')}><GitBranch size={14}/>修改</button><button className={tab === 'terminal' ? 'active' : ''} onClick={() => setTab('terminal')}><Terminal size={14}/>终端</button></div>
-      {tab === 'changes' ? <RunPanel task={task} runId={runId} selectRun={setRunId} locked={projectBusy} fail={fail} preview={path => setPicker({ path })}/> : <div className="terminal-panel"><div className="terminal-heading"><span className="green-dot"/>zsh <span>只显示本任务输出</span></div><pre>{task?.events.filter(e => e.kind === 'output').map(e => e.text).join('') || '等待执行命令…\n\n每条命令将在确认后运行。'}</pre><p>终端修改不计入文件工具差异。</p></div>}
+      {tab === 'changes' ? <RunPanel task={task} runId={runId} selectRun={setRunId} locked={projectBusy} fail={fail} preview={path => setPicker({ path })}/> : <div className="terminal-panel"><div className="terminal-heading"><span className="green-dot"/>zsh <span>只显示本任务输出</span></div>{task && <HistoryControls hasMore={history.hasMore} loading={history.loading} incomplete={task.historyIncomplete} load={() => void history.loadEarlier()}/>}<pre>{history.events.filter(e => e.kind === 'output').map(e => e.text).join('') || '已加载记录中暂无命令输出。\n\n每条命令将在确认后运行。'}</pre><p>终端修改不计入文件工具差异。</p></div>}
       <div className="runtime-card"><div><Cpu size={15}/><strong>本地运行环境</strong></div><dl><dt>推理服务</dt><dd>LM Studio</dd><dt>执行引擎</dt><dd>独立进程</dd><dt>任务调度</dt><dd>{state.activeId ? '1 个运行中' : '空闲'}{state.tasks.some(t => t.status === 'queued') ? ` · ${state.tasks.filter(t => t.status === 'queued').length} 个排队` : ''}</dd></dl></div>
     </aside>
     {error && <div className="toast" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={() => setError('')}><X size={16}/></button></div>}

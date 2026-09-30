@@ -14,6 +14,7 @@ import { EvaluationController } from './evaluation';
 import { DiagnosticLog, diagnosticReport, errorCategory, saveDiagnosticReport } from './diagnostics';
 import { LMStudioProvider } from '../engine/provider';
 import { settingsSchema, submitSchema } from '../shared/validation';
+import { linkedPlanContext, pageTaskEvents, taskHistorySnapshot } from '../shared/task-history';
 import { busyStatuses, type AppInfo, type EngineEvent, type Settings, type Snapshot, type Task, type Run, type Progress } from '../shared/types';
 
 // Keep legacy identity when upgrading: macOS safeStorage keys also depend on the app name.
@@ -52,7 +53,7 @@ function settings(): Settings {
   }
   return saved;
 }
-function snapshot(): Snapshot { return { projects: store.projects(), tasks, settings: settings(), activeId: active?.task.id, evaluations: evaluation?.reports() || [] }; }
+function snapshot(): Snapshot { return { projects: store.projects(), tasks: tasks.map(taskHistorySnapshot), settings: settings(), activeId: active?.task.id, evaluations: evaluation?.reports() || [] }; }
 function broadcast() { if (win && !win.isDestroyed()) win.webContents.send('app:update', snapshot()); }
 function persist(task: Task) { syncRun(task); store.putTask(task); broadcast(); }
 function idleRequired() { if (evaluation?.busy) throw new Error('模型能力实测正在运行，请先停止或完成实测'); if (modelOperation || tasks.some(t => busyStatuses.includes(t.status))) throw new Error('请先停止或完成运行中和排队中的任务，再调整模型或设置'); }
@@ -101,11 +102,11 @@ function pump() {
       if (event.type === 'process') { if (event.running) { active.pids.add(event.pid); if (run?.progress?.phase !== 'stopping') { progress(task, 'command'); persist(task); } } else active.pids.delete(event.pid); return; }
       if (event.type === 'delta') { win?.webContents.send('task:delta', { taskId: task.id, text: event.text }); return; }
       if (event.type === 'messages') task.messages = event.messages;
-      if (event.type === 'event') { task.events.push(event.event); task.events = task.events.slice(-600); if (event.event.kind === 'error') diagnostics.record({ event: 'tool_error', taskId: task.id, runId: task.currentRunId, errorCategory: errorCategory(event.event.text) }); }
+      if (event.type === 'event') { task.events.push(event.event); if (event.event.kind === 'error') diagnostics.record({ event: 'tool_error', taskId: task.id, runId: task.currentRunId, errorCategory: errorCategory(event.event.text) }); }
       if (event.type === 'change') { if (run && event.checkpoint) { const i = run.changes.findIndex(c => c.path === event.checkpoint!.path); if (i < 0) run.changes.push(event.checkpoint); else run.changes[i] = event.checkpoint; } const index = task.changes.findIndex(c => c.path === event.change.path); if (index < 0) task.changes.push(event.change); else task.changes[index] = event.change; }
       if (event.type === 'approval') { if (run?.progress?.phase === 'stopping') return; task.approval = event.approval; task.status = 'waiting'; progress(task, 'approval'); }
       if (event.type === 'approval-resolved') { task.approval = undefined; task.status = 'running'; if (run?.progress?.phase !== 'stopping') progress(task, 'tool'); }
-      if (event.type === 'done') { task.lastRun = event.evidence; finish(task, event.status, event.error); return; }
+      if (event.type === 'done') { if (run?.mode === 'plan' && event.status === 'completed' && event.result?.trim()) run.planText = event.result; task.lastRun = event.evidence; finish(task, event.status, event.error); return; }
       persist(task);
     });
     let stderr = '';
@@ -195,6 +196,11 @@ function registerApi() {
     if (input.archived) task.archivedAt ??= Date.now(); else delete task.archivedAt;
     store.putTask(task); broadcast();
   });
+  register('task:events', (raw: unknown) => {
+    const input = z.object({ taskId: uuid, before: z.string().min(1).max(200).optional() }).strict().parse(raw);
+    const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
+    return pageTaskEvents(task, input.before);
+  });
   register('settings:save', (raw: unknown) => {
     idleRequired(); const value = settingsSchema.parse(raw);
     if (value.token) {
@@ -277,6 +283,7 @@ function registerApi() {
     if (input.reviewRunId && input.mode !== 'review') throw new Error('审查轮次只用于审查模式');
     // Re-read planned file paths now. Never reuse a plan's old line ranges.
     const plannedFiles = plan ? [...new Set(plan.references.map(r => r.path))] : [];
+    const planContext = plan ? linkedPlanContext(plan, plannedFiles) : '';
     for (const file of plannedFiles) await referenceFile(project, file);
     if (!task) {
       task = { id: randomUUID(), projectId: project.id, title: input.prompt.slice(0, 50), model: config.model, status: 'queued', createdAt: Date.now(), messages: [], events: [], changes: [] };
@@ -287,7 +294,7 @@ function registerApi() {
     task.runs ??= []; task.runs.push(run); task.currentRunId = run.id; task.mode = input.mode;
     progress(task, 'queued');
     let context = referenceContext(references);
-    if (plan) context += '\n用户已确认进入新的执行轮次。之前计划模式的只读限制和拒绝结果不适用于本轮；当前允许项目内文件写入。原始目标要求：' + plan.input + '\n以下为关联计划，重新读取相关文件，不沿用旧行号：\n' + task.events.filter(e => e.runId === plan.id && e.role === 'assistant').map(e => e.text).join('\n').slice(-12000) + '\n已重新确认的引用文件：' + plannedFiles.join('、');
+    context += planContext;
     if (review) { const patches = review.changes.filter(c => c.state === 'written').map(c => c.patch).join('\n'); context += `\n审查目标轮次：${review.id}，原始要求：${review.input}。show_changes 只返回该轮实际差异。已回退和未核验检查点不视为现有改动。\n${patches.slice(0, 24000)}${patches.length > 24000 ? '\n差异已截断，请读取相关文件继续检查。' : ''}`; }
     task.messages.push({ role: 'user', content: input.prompt + (context ? '\n\n' + context : '') });
     task.events.push({ id: randomUUID(), at: Date.now(), kind: 'message', role: 'user', text: input.prompt, runId: run.id });
