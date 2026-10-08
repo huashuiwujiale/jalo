@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import initSqlJs from 'sql.js';
 import { Store, taskSaveDelay } from '../electron/store';
 import type { Task, Run, RunChange } from '../shared/types';
@@ -18,20 +19,40 @@ async function fixture() {
   return { home, file, store, cleanup: async () => { store.close(); await fs.rm(home, { recursive: true, force: true }); } };
 }
 function observe(store: Store) {
-  const db = (store as any).db, originalExport = db.export, originalRun = db.run;
-  const counts = { exports: 0, tasks: 0, runs: 0, checkpoints: 0 };
-  db.export = function () { counts.exports++; return originalExport.call(this); };
-  db.run = function (sql: string, ...args: any[]) {
-    const result = originalRun.call(this, sql, ...args), table = sql.match(/^INSERT INTO (tasks|runs|checkpoints) /)?.[1];
-    if (table && this.getRowsModified()) counts[table as 'tasks' | 'runs' | 'checkpoints']++;
+  const db = (store as any).db, originalExec = db.exec, originalPrepare = db.prepare;
+  const counts = { commits: 0, tasks: 0, runs: 0, checkpoints: 0 };
+  let before = 0;
+  const changes = () => Number(originalPrepare.call(db, 'SELECT total_changes() AS count').get().count);
+  db.exec = function (sql: string) {
+    if (/^BEGIN\b/.test(sql)) before = changes();
+    const result = originalExec.call(this, sql);
+    if (/^COMMIT\b/.test(sql) && changes() > before) counts.commits++;
     return result;
+  };
+  db.prepare = function (sql: string) {
+    const statement = originalPrepare.call(this, sql), table = sql.match(/^INSERT INTO (tasks|runs|checkpoints) /)?.[1];
+    if (table) {
+      const run = statement.run;
+      statement.run = function (...args: any[]) {
+        const result = run.apply(this, args);
+        if (result.changes) counts[table as 'tasks' | 'runs' | 'checkpoints']++;
+        return result;
+      };
+    }
+    return statement;
   };
   return counts;
 }
-async function diskTask(file: string, id = 'task') {
-  const SQL = await initSqlJs(), db = new SQL.Database(await fs.readFile(file));
-  try { return JSON.parse(String(db.exec('SELECT data FROM tasks WHERE id=?', [id])[0].values[0][0])); }
+function diskRecord(file: string, table: string, id: string) {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try { const row = db.prepare(`SELECT data FROM ${table} WHERE id=?`).get(id); return row && JSON.parse(String(row.data)); }
   finally { db.close(); }
+}
+const diskTask = (file: string, id = 'task') => diskRecord(file, 'tasks', id);
+function rejectCommit(store: Store) {
+  const db = (store as any).db, exec = db.exec;
+  db.exec = function (sql: string) { if (/^COMMIT\b/.test(sql)) throw new Error('模拟提交失败'); return exec.call(this, sql); };
+  return () => { db.exec = exec; };
 }
 
 test('100 ordinary updates coalesce into one durable save with the newest progress and all events', async () => {
@@ -42,12 +63,14 @@ test('100 ordinary updates coalesce into one durable save with the newest progre
       t.events.push(event('event-' + i)); t.runs![0].progress = { phase: 'generating', since: i };
       x.store.deferTask(t, t.currentRunId);
     }
-    assert.equal(counts.exports, 0); assert.equal((await diskTask(x.file)).historyLength, 0);
+    assert.equal(counts.commits, 0); assert.equal(diskTask(x.file).historyLength, 0);
     await new Promise(r => setTimeout(r, taskSaveDelay + 30));
-    assert.equal(counts.exports, 1); assert.equal(counts.tasks, 1); assert.equal(counts.runs, 1);
+    assert.equal(counts.commits, 1); assert.equal(counts.tasks, 1); assert.equal(counts.runs, 1);
     assert.equal((await diskTask(x.file)).historyLength, 100);
     assert.equal(x.store.tasks()[0].runs![0].progress!.since, 99);
-    x.store.flush(); x.store.putTask(t, t.currentRunId); assert.equal(counts.exports, 1);
+    const walSize = (await fs.stat(x.file + '-wal')).size;
+    x.store.flush(); x.store.putTask(t, t.currentRunId); assert.equal(counts.commits, 1);
+    assert.equal((await fs.stat(x.file + '-wal')).size, walSize, 'unchanged saves must not append WAL frames');
   } finally { await x.cleanup(); }
 });
 
@@ -59,11 +82,11 @@ test('critical checkpoint saves drain all pending tasks and reach disk before re
     other.events.push(event('pending-other')); x.store.deferTask(other, other.currentRunId);
     t.events.push(event('pending-tool')); x.store.deferTask(t, t.currentRunId);
     t.runs![0].changes.push(checkpoint(t.currentRunId!)); x.store.putTask(t, t.currentRunId);
-    assert.equal(counts.exports, 1); assert.equal((await diskTask(x.file, 'other')).historyLength, 1);
-    const SQL = await initSqlJs(), db = new SQL.Database(await fs.readFile(x.file));
-    try { assert.equal(JSON.parse(String(db.exec('SELECT data FROM checkpoints')[0].values[0][0])).state, 'prepared'); }
+    assert.equal(counts.commits, 1); assert.equal(diskTask(x.file, 'other').historyLength, 1);
+    const db = new DatabaseSync(x.file, { readOnly: true });
+    try { assert.equal(JSON.parse(String(db.prepare('SELECT data FROM checkpoints').get()!.data)).state, 'prepared'); }
     finally { db.close(); }
-    await new Promise(r => setTimeout(r, taskSaveDelay + 30)); assert.equal(counts.exports, 1);
+    await new Promise(r => setTimeout(r, taskSaveDelay + 30)); assert.equal(counts.commits, 1);
     const reopened = await Store.open(x.file);
     try { assert.equal(reopened.tasks().find(t => t.id === 'task')!.runs![0].changes[0].state, 'uncertain'); }
     finally { reopened.close(); }
@@ -80,7 +103,7 @@ test('active-run saves append events without serializing old history or rewritin
     (t.events[0] as any).toJSON = () => { throw new Error('old event serialized'); };
     t.events.push(event('new-event')); t.runs![1].progress = { phase: 'generating', since: 2 };
     x.store.putTask(t, t.currentRunId);
-    assert.deepEqual(counts, { exports: 1, tasks: 1, runs: 1, checkpoints: 0 });
+    assert.deepEqual(counts, { commits: 1, tasks: 1, runs: 1, checkpoints: 0 });
     const raw = await diskTask(x.file); assert.equal(raw.events, undefined); assert.equal(raw.runs, undefined); assert.deepEqual(raw.runIds, ['old', t.currentRunId]);
     const restored = x.store.tasks()[0]; assert.equal(restored.runs![0].planText, old.planText); assert.equal(restored.events.length, 2);
     delete (old as any).toJSON; old.changes[0].state = 'reverted';
@@ -94,7 +117,7 @@ test('close drains pending writes; opening an unchanged completed database does 
   try {
     const t = task(); x.store.putTask(t); const counts = observe(x.store);
     t.events.push(event('last-event')); x.store.deferTask(t, t.currentRunId); x.store.close(); closed = true;
-    assert.equal(counts.exports, 1);
+    assert.equal(counts.commits, 1);
     const before = await fs.stat(x.file), reopened = await Store.open(x.file);
     assert.equal(reopened.tasks()[0].events.at(-1)?.id, 'last-event'); reopened.close();
     assert.equal((await fs.stat(x.file)).ino, before.ino);
@@ -104,43 +127,52 @@ test('close drains pending writes; opening an unchanged completed database does 
 test('deferred disk failure reports once, keeps the previous database intact and retries without duplicate events', async () => {
   const x = await fixture();
   try {
-    const t = task(); x.store.putTask(t); const before = await fs.readFile(x.file);
-    await fs.mkdir(x.file + '.tmp'); let errors = 0;
+    const t = task(); x.store.putTask(t); const before = diskTask(x.file), db = (x.store as any).db;
+    db.exec('PRAGMA query_only=ON'); let errors = 0;
     t.events.push(event('retained')); x.store.deferTask(t, t.currentRunId, () => errors++);
     await new Promise(r => setTimeout(r, taskSaveDelay + 30));
-    assert.equal(errors, 1); assert.deepEqual(await fs.readFile(x.file), before);
-    await fs.rm(x.file + '.tmp', { recursive: true });
+    assert.equal(errors, 1); assert.deepEqual(diskTask(x.file), before);
+    assert.equal(x.store.hasPending(t.id), true);
+    db.exec('PRAGMA query_only=OFF');
     t.events.push(event('after-recovery')); x.store.putTask(t, t.currentRunId);
     assert.deepEqual(x.store.tasks()[0].events.map(e => e.id), ['retained', 'after-recovery']);
     assert.equal((await diskTask(x.file)).historyLength, 2);
-  } finally { await x.cleanup(); }
+  } finally { (x.store as any).db.exec('PRAGMA query_only=OFF'); await x.cleanup(); }
 });
 
 test('synchronous flush failures notify every pending task once and retain updates for retry', async () => {
-  for (const trigger of ['task', 'project', 'settings', 'close'] as const) {
+  for (const trigger of ['task', 'metadata', 'project', 'settings', 'close'] as const) {
     const x = await fixture();
     try {
       const first = task(), second = task('second'), errors = [0, 0];
       x.store.putTask(first); x.store.putTask(second);
-      const before = await fs.readFile(x.file);
+      x.store.putProject({ id: 'project', name: 'original', path: x.home });
+      x.store.putSettings(defaults);
+      const before = [diskTask(x.file), diskTask(x.file, 'second')];
       for (const [i, value] of [first, second].entries()) {
         value.events.push(event('pending-' + value.id));
-        x.store.deferTask(value, value.currentRunId, error => { assert.match(error.message, /EISDIR/); errors[i]++; });
+        x.store.deferTask(value, value.currentRunId, error => { assert.match(error.message, /模拟提交失败/); errors[i]++; });
       }
-      await fs.mkdir(x.file + '.tmp');
+      const restore = rejectCommit(x.store);
       try {
         assert.throws(() => {
           if (trigger === 'task') { first.title = 'renamed'; x.store.putTask(first); }
+          else if (trigger === 'metadata') x.store.updateMetadata(first.id, { title: 'renamed' });
           else if (trigger === 'project') x.store.putProject({ id: 'project', name: 'renamed', path: x.home });
-          else if (trigger === 'settings') x.store.putSettings(defaults);
+          else if (trigger === 'settings') x.store.putSettings({ ...defaults, model: 'changed-model' });
           else x.store.close();
-        }, /EISDIR/);
+        }, /模拟提交失败/);
         assert.deepEqual(errors, [1, 1], trigger);
         await new Promise(r => setTimeout(r, taskSaveDelay + 30));
         assert.deepEqual(errors, [1, 1], 'cancelled timer must not notify twice');
-        assert.deepEqual(await fs.readFile(x.file), before);
-      } finally { await fs.rm(x.file + '.tmp', { recursive: true, force: true }); }
+        assert.deepEqual([diskTask(x.file), diskTask(x.file, 'second')], before);
+        assert.equal(diskRecord(x.file, 'projects', 'project').name, 'original', 'project writes must roll back with pending tasks');
+        assert.equal(diskRecord(x.file, 'settings', 'default').model, defaults.model, 'settings writes must roll back with pending tasks');
+      } finally { restore(); }
       x.store.flush();
+      if (trigger === 'task' || trigger === 'metadata') assert.equal(diskTask(x.file).title, 'renamed');
+      if (trigger === 'project') assert.equal(diskRecord(x.file, 'projects', 'project').name, 'renamed');
+      if (trigger === 'settings') assert.equal(diskRecord(x.file, 'settings', 'default').model, 'changed-model');
       const reopened = await Store.open(x.file);
       try {
         for (const value of reopened.tasks()) assert.deepEqual(value.events.map(e => e.id), ['pending-' + value.id]);
@@ -152,10 +184,10 @@ test('synchronous flush failures notify every pending task once and retain updat
 test('transaction failure rolls back metadata and event append; retry preserves original history', async () => {
   const x = await fixture();
   try {
-    const t = task(); t.events.push(event('original')); x.store.putTask(t); const before = await fs.readFile(x.file);
+    const t = task(); t.events.push(event('original')); x.store.putTask(t); const before = diskTask(x.file);
     t.title = 'new-title'; t.events.push(event('original'));
     assert.throws(() => x.store.putTask(t), /UNIQUE/);
-    assert.equal(x.store.tasks()[0].title, '任务'); assert.deepEqual(await fs.readFile(x.file), before);
+    assert.equal(x.store.tasks()[0].title, '任务'); assert.deepEqual(diskTask(x.file), before);
     t.events[1] = event('fixed'); x.store.putTask(t);
     assert.equal(x.store.tasks()[0].title, 'new-title'); assert.equal(x.store.tasks()[0].events.length, 2);
     const full = t.events; t.events = t.events.slice(1);

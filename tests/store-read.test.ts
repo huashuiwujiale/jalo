@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import initSqlJs from 'sql.js';
+import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../electron/store';
 import { pageTaskEvents } from '../shared/task-history';
 import { taskDetail, taskSummary } from '../shared/task-wire';
@@ -40,8 +40,8 @@ test('startup reads summaries only; details and cursor pages read at most 100 ev
     db.prepare = function (sql: string, ...args: unknown[]) {
       const statement = prepare.call(this, sql, ...args);
       if (/^SELECT seq,data FROM task_events/.test(sql)) {
-        const step = statement.step;
-        statement.step = function () { const found = step.call(this); if (found) eventsRead++; return found; };
+        const iterate = statement.iterate;
+        statement.iterate = function* (...parameters: unknown[]) { for (const row of iterate.call(this, ...parameters)) { eventsRead++; yield row; } };
       }
       if (/SELECT data FROM (tasks|runs|checkpoints)(?:\s|$)/.test(sql)) throw new Error(`unexpected body read: ${sql}`);
       return statement;
@@ -73,6 +73,7 @@ test('metadata edits preserve full history and plans; append saves keep catalog 
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'jalo-catalog-')); let store: Store | undefined;
   try {
     store = await Store.open(path.join(home, 'state.sqlite'));
+    assert.throws(() => store!.updateMetadata('missing', { title: 'invalid' }), /任务不存在/);
     const value = task('task', 1200); store.putTask(value);
     const db = (store as any).db, prepare = db.prepare;
     db.prepare = function (sql: string, ...args: unknown[]) {
@@ -99,7 +100,7 @@ test('metadata edits preserve full history and plans; append saves keep catalog 
     assert.throws(() => store!.putTask(restored), /UNIQUE/);
     assert.deepEqual(store.summary(value.id), previous, 'catalog rolls back with event and task writes');
     restored.events.pop(); restored.title = '改名后'; store.putTask(restored);
-    db.run('DELETE FROM task_events WHERE task_id=? AND seq=1100', [value.id]);
+    db.prepare('DELETE FROM task_events WHERE task_id=? AND seq=1100').run(value.id);
     assert.throws(() => store!.events(value.id, { around: 'task-1101' }), /历史记录不完整/);
     assert.throws(() => store!.task(value.id), /历史记录不完整/);
   } finally { store?.close(); await fs.rm(home, { recursive: true, force: true }); }
@@ -115,9 +116,9 @@ test('v5 migration backs up original bytes and only unfinished tasks hydrate on 
     interrupted.runs![0].status = 'running'; interrupted.runs![0].changes[0].state = 'prepared';
     interrupted.runs![0].progress = { phase: 'approval', since: 1 };
     store.putTask(completed); store.putTask(interrupted); store.close(); store = undefined;
-    const SQL = await initSqlJs(), db = new SQL.Database(await fs.readFile(file));
-    db.run('DROP TABLE task_catalog; PRAGMA user_version=5');
-    const bytes = Buffer.from(db.export()); db.close(); await fs.writeFile(file, bytes);
+    const db = new DatabaseSync(file);
+    db.exec('PRAGMA journal_mode=DELETE; DROP TABLE task_catalog; PRAGMA user_version=5');
+    db.close(); const bytes = await fs.readFile(file);
     const reads: string[] = [];
     Store.prototype.task = function (id) { reads.push(id); return fullRead.call(this, id); };
     store = await Store.open(file);

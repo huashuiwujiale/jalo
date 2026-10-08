@@ -1,4 +1,4 @@
-import initSqlJs, { type Database } from 'sql.js';
+import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Project, Task, Settings, Event, Run, RunChange, TaskSummary, TaskDetail, EventCursor, EventPage, RunView } from '../shared/types';
@@ -15,30 +15,47 @@ export const taskSaveDelay = 200;
 
 export class Store {
   private pending = new Map<string, PendingTask>();
+  private records = new Map<string, { table: string; id: string; value: unknown }>();
+  private metadata = new Map<string, { title?: string; archivedAt?: number }>();
   private timer?: ReturnType<typeof setTimeout>;
-  private dirty = true;
   private heads = new Map<string, HistoryHead>();
   private knownRuns = new Map<string, string>();
   private runViews = new WeakMap<Run, RunView>();
-  private constructor(private db: Database, private file: string) {}
+  private constructor(private db: DatabaseSync) {}
   static async open(file: string) {
-    const SQL = await initSqlJs({ locateFile: name => path.join(path.dirname(require.resolve('sql.js')), name) });
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const db = new SQL.Database(fs.existsSync(file) ? fs.readFileSync(file) : undefined);
-    const store = new Store(db, file);
+    const existing = fs.existsSync(file);
+    if (!existing) fs.closeSync(fs.openSync(file, 'wx', 0o600));
+    fs.chmodSync(file, 0o600);
+    const db = new DatabaseSync(file), store = new Store(db);
+    let transaction = false;
     try {
-      const revision = Number(db.exec('PRAGMA user_version')[0]?.values[0]?.[0] || 0);
-      if (revision < 6 && fs.existsSync(file)) fs.copyFileSync(file, file + `.before-v${revision < 2 ? 2 : revision < 3 ? 3 : revision < 4 ? 4 : revision < 5 ? 5 : 6}-` + Date.now() + '.bak', fs.constants.COPYFILE_EXCL);
-      db.run('CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
-      db.run('CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS evaluations (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
-      db.run('CREATE TABLE IF NOT EXISTS task_events (task_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (task_id,seq), UNIQUE (task_id,id))');
-      db.run('CREATE TABLE IF NOT EXISTS task_catalog (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, archived INTEGER NOT NULL, title TEXT NOT NULL, data TEXT NOT NULL, view TEXT NOT NULL, requests TEXT NOT NULL, recovery INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS task_catalog_project ON task_catalog(project_id,archived)');
-      store.dirty = revision < 6;
+      db.exec('PRAGMA busy_timeout=1000');
+      const revision = Number(db.prepare('PRAGMA user_version').get()!.user_version);
+      if (revision > 7) throw new Error('数据库版本高于当前应用，请使用较新版本打开');
+      if (revision < 7 && existing) {
+        const backup = file + `.before-v${revision < 2 ? 2 : revision < 3 ? 3 : revision < 4 ? 4 : revision < 5 ? 5 : revision < 6 ? 6 : 7}-` + Date.now() + '.bak';
+        // A raw copy preserves legacy bytes. An existing WAL needs a consistent
+        // SQLite snapshot so committed pages outside the main file are included.
+        if (fs.existsSync(file + '-wal') && fs.statSync(file + '-wal').size) db.prepare('VACUUM INTO ?').run(backup);
+        else fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL);
+        fs.chmodSync(backup, 0o600);
+        const saved = fs.openSync(backup, 'r'); try { fs.fsyncSync(saved); } finally { fs.closeSync(saved); }
+        const directory = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+      }
+      const mode = db.prepare('PRAGMA journal_mode=WAL').get()!.journal_mode;
+      if (mode !== 'wal') throw new Error('数据库无法启用 WAL，请检查数据目录');
+      db.exec('PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=1000; PRAGMA journal_size_limit=16777216; PRAGMA cache_size=-8192');
+      db.exec('BEGIN IMMEDIATE'); transaction = true;
+      db.exec('CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
+      db.exec('CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS evaluations (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
+      db.exec('CREATE TABLE IF NOT EXISTS task_events (task_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (task_id,seq), UNIQUE (task_id,id))');
+      db.exec('CREATE TABLE IF NOT EXISTS task_catalog (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, archived INTEGER NOT NULL, title TEXT NOT NULL, data TEXT NOT NULL, view TEXT NOT NULL, requests TEXT NOT NULL, recovery INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS task_catalog_project ON task_catalog(project_id,archived)');
       for (const report of store.evaluations()) if (report.status === 'running') store.saveEvaluation(endEvaluation(report, 'interrupted', '应用退出时实测未完成，请手动重新测试'));
       // A migration reads one task at a time. Normal startup only hydrates tasks
       // with unfinished runs/checkpoints, never all completed history.
-      const ids = db.exec(revision < 6 ? 'SELECT id FROM tasks' : 'SELECT id FROM task_catalog WHERE recovery=1')[0]?.values || [];
-      for (const [id] of ids) {
+      const ids = db.prepare(revision < 6 ? 'SELECT id FROM tasks' : 'SELECT id FROM task_catalog WHERE recovery=1').all();
+      for (const { id } of ids) {
         const task = store.task(String(id));
         let changed = revision < 6;
         if (revision < 4) {
@@ -56,27 +73,27 @@ export class Store {
         }
         if (changed) { store.enqueue(task); store.writeTasks(); store.pending.clear(); }
       }
-      if (revision < 5) {
-        db.run('VACUUM'); // Reclaim the nested history copies removed by migration.
-        store.dirty = true;
-      }
-      if (revision < 6) db.run('PRAGMA user_version = 6');
-      store.flush(); return store;
-    } catch (error) { db.close(); throw error; }
+      if (revision < 7) db.exec('PRAGMA user_version = 7');
+      db.exec('COMMIT'); transaction = false;
+      if (revision < 5) db.exec('VACUUM'); // Reclaim nested history copies removed by migration.
+      return store;
+    } catch (error) {
+      if (transaction) try { db.exec('ROLLBACK'); } catch { /* Preserve the original failure. */ }
+      db.close(); throw error;
+    }
   }
   private all<T>(table: string): T[] {
-    const statement = this.db.prepare(`SELECT data FROM ${table}`), result: T[] = [];
-    try { while (statement.step()) result.push(JSON.parse(String(statement.get()[0]))); } finally { statement.free(); }
+    const result: T[] = [];
+    for (const { data } of this.db.prepare(`SELECT data FROM ${table}`).iterate()) result.push(JSON.parse(String(data)));
     return result;
   }
   private write(table: string, id: string, value: unknown) {
-    this.db.run(`INSERT INTO ${table} (id,data) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE data<>excluded.data`, [id, JSON.stringify(value)]);
-    if (this.db.getRowsModified()) this.dirty = true;
+    this.db.prepare(`INSERT INTO ${table} (id,data) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE data<>excluded.data`).run(id, JSON.stringify(value));
   }
-  private put(table: string, id: string, value: unknown) { this.write(table, id, value); this.flush(); }
+  private put(table: string, id: string, value: unknown) { this.records.set(`${table}:${id}`, { table, id, value }); this.flush(); }
   projects(includeRemoved = false) { return this.all<Project>('projects').filter(p => includeRemoved || !p.removedAt); }
   private get<T>(table: string, id: string): T | undefined {
-    const data = this.db.exec(`SELECT data FROM ${table} WHERE id=?`, [id])[0]?.values[0]?.[0];
+    const data = this.db.prepare(`SELECT data FROM ${table} WHERE id=?`).get(id)?.data;
     return data === undefined ? undefined : JSON.parse(String(data));
   }
   /** Explicit full reads are reserved for execution, rollback and migration. */
@@ -88,7 +105,7 @@ export class Store {
     const events = this.readEvents(id, 0, historyLength);
     return { ...data, events, ...(runIds ? { runs: runIds.map(runId => this.run(id, runId)) } : {}) };
   }
-  tasks(): Task[] { return (this.db.exec('SELECT id FROM tasks')[0]?.values || []).map(([id]) => this.task(String(id))).sort((a, b) => b.createdAt - a.createdAt); }
+  tasks(): Task[] { return this.db.prepare('SELECT id FROM tasks').all().map(({ id }) => this.task(String(id))).sort((a, b) => b.createdAt - a.createdAt); }
   summaries(): TaskSummary[] { return this.all<TaskSummary>('task_catalog').sort((a, b) => b.createdAt - a.createdAt); }
   summary(id: string): TaskSummary {
     const summary = this.get<TaskSummary>('task_catalog', id);
@@ -110,14 +127,10 @@ export class Store {
   private readEvents(id: string, start: number, end: number): Event[] {
     const statement = this.db.prepare('SELECT seq,data FROM task_events WHERE task_id=? AND seq>=? AND seq<? ORDER BY seq');
     const events: Event[] = [];
-    try {
-      statement.bind([id, start, end]);
-      while (statement.step()) {
-        const [seq, data] = statement.get();
-        if (Number(seq) !== start + events.length) throw new Error('任务历史记录不完整，请保留数据库并检查备份');
-        events.push(JSON.parse(String(data)));
-      }
-    } finally { statement.free(); }
+    for (const { seq, data } of statement.iterate(id, start, end)) {
+      if (Number(seq) !== start + events.length) throw new Error('任务历史记录不完整，请保留数据库并检查备份');
+      events.push(JSON.parse(String(data)));
+    }
     if (events.length !== end - start) throw new Error('任务历史记录不完整，请保留数据库并检查备份');
     return events;
   }
@@ -125,7 +138,7 @@ export class Store {
     const total = this.summary(id).eventCount;
     if ([cursor.before, cursor.after, cursor.around].filter(id => id !== undefined).length > 1) throw new Error('历史记录游标只能指定一个方向');
     const anchor = cursor.before ?? cursor.after ?? cursor.around;
-    const seq = anchor === undefined ? undefined : this.db.exec('SELECT seq FROM task_events WHERE task_id=? AND id=?', [id, anchor])[0]?.values[0]?.[0];
+    const seq = anchor === undefined ? undefined : this.db.prepare('SELECT seq FROM task_events WHERE task_id=? AND id=?').get(id, anchor)?.seq;
     if (anchor !== undefined && seq === undefined) throw new Error('历史记录游标不存在，请重新打开任务');
     let start: number, end: number;
     if (cursor.after !== undefined) { start = Number(seq) + 1; end = Math.min(total, start + historyPageSize); }
@@ -134,7 +147,7 @@ export class Store {
     return { events: this.readEvents(id, start, end), start, total, hasMore: start > 0 };
   }
   view(id: string): Omit<TaskDetail, 'revision' | 'events' | 'eventCount'> {
-    const value = this.db.exec('SELECT view FROM task_catalog WHERE id=?', [id])[0]?.values[0]?.[0];
+    const value = this.db.prepare('SELECT view FROM task_catalog WHERE id=?').get(id)?.view;
     if (value === undefined) throw new Error('任务不存在');
     return JSON.parse(String(value));
   }
@@ -145,23 +158,22 @@ export class Store {
   }
   search(projectId: string, archived: boolean, query: string): string[] {
     const term = query.trim().toLocaleLowerCase();
-    return (this.db.exec('SELECT id FROM task_catalog WHERE project_id=? AND archived=? AND (?=\'\' OR instr(title,?)>0 OR EXISTS (SELECT 1 FROM json_each(task_catalog.requests) WHERE instr(value,?)>0))', [projectId, Number(archived), term, term, term])[0]?.values || []).map(([id]) => String(id));
+    return this.db.prepare('SELECT id FROM task_catalog WHERE project_id=? AND archived=? AND (?=\'\' OR instr(title,?)>0 OR EXISTS (SELECT 1 FROM json_each(task_catalog.requests) WHERE instr(value,?)>0))').all(projectId, Number(archived), term, term, term).map(({ id }) => String(id));
   }
   changes(id: string) { const row = this.get<StoredTask>('tasks', id); if (!row) throw new Error('任务不存在'); return row.changes; }
   hasPending(id: string) { return this.pending.has(id); }
   updateMetadata(id: string, patch: { title?: string; archivedAt?: number }) {
-    this.flush();
+    if (!this.pending.has(id)) this.summary(id);
+    this.metadata.set(id, { ...this.metadata.get(id), ...patch }); this.flush();
+  }
+  private writeMetadata(id: string, patch: { title?: string; archivedAt?: number }) {
     const task = this.get<StoredTask>('tasks', id), summary = this.summary(id);
     if (!task) throw new Error('任务不存在');
-    const view = JSON.parse(String(this.db.exec('SELECT view FROM task_catalog WHERE id=?', [id])[0].values[0][0]));
-    const dirty = this.dirty;
-    this.db.run('BEGIN');
-    try {
-      this.write('tasks', id, { ...task, ...patch });
-      this.db.run('UPDATE task_catalog SET data=?,view=?,title=?,archived=? WHERE id=?', [JSON.stringify({ ...summary, ...patch }), JSON.stringify({ ...view, ...patch }), (patch.title ?? task.title).toLocaleLowerCase(), Number(!!('archivedAt' in patch ? patch.archivedAt : task.archivedAt)), id]);
-      this.dirty = true; this.db.run('COMMIT');
-    } catch (error) { this.db.run('ROLLBACK'); this.dirty = dirty; throw error; }
-    this.flush();
+    const view = this.view(id);
+    const summaryJSON = JSON.stringify({ ...summary, ...patch }), viewJSON = JSON.stringify({ ...view, ...patch });
+    this.write('tasks', id, { ...task, ...patch });
+    this.db.prepare('UPDATE task_catalog SET data=?,view=?,title=?,archived=? WHERE id=? AND (data<>? OR view<>?)').run(
+      summaryJSON, viewJSON, (patch.title ?? task.title).toLocaleLowerCase(), Number(!!('archivedAt' in patch ? patch.archivedAt : task.archivedAt)), id, summaryJSON, viewJSON);
   }
   settings(): Settings { return { ...defaults, ...this.all<Settings>('settings')[0] }; }
   putProject(project: Project) { this.put('projects', project.id, project); }
@@ -181,41 +193,32 @@ export class Store {
   /** Critical saves drain pending updates before acknowledging a checkpoint. */
   putTask(task: Task, runId?: string) { this.enqueue(task, runId); this.flush(); }
   private writeTasks() {
-    if (!this.pending.size) return;
-    const dirty = this.dirty, heads = new Map<string, HistoryHead>(), savedRuns = new Map<string, string>();
-    this.db.run('BEGIN');
-    try {
-      for (const { task, runIds } of this.pending.values()) {
-        let head = this.heads.get(task.id);
-        if (!head) {
-          const row = this.db.exec('SELECT seq,id FROM task_events WHERE task_id=? ORDER BY seq DESC LIMIT 1', [task.id])[0]?.values[0];
-          head = { length: row ? Number(row[0]) + 1 : 0, lastId: row ? String(row[1]) : undefined };
-        }
-        if (task.events.length < head.length || (head.length && task.events[head.length - 1].id !== head.lastId)) throw new Error('任务历史不能截短或重排，请重新读取完整任务');
-        const statement = this.db.prepare('INSERT INTO task_events (task_id,seq,id,data) VALUES (?,?,?,?)');
-        try { for (let i = head.length; i < task.events.length; i++) statement.run([task.id, i, task.events[i].id, JSON.stringify(task.events[i])]); }
-        finally { statement.free(); }
-        if (task.events.length > head.length) this.dirty = true;
-        heads.set(task.id, { length: task.events.length, lastId: task.events.at(-1)?.id });
-        const { events, runs, eventCount, userRequests, ...data } = task;
-        if (runIds && [...runIds].some(id => !runs?.some(run => run.id === id))) throw new Error('待保存的轮次不存在，拒绝丢失修改');
-        this.write('tasks', task.id, { ...data, historyLength: events.length, ...(runs ? { runIds: runs.map(run => run.id) } : {}) });
-        for (const run of runs || []) {
-          const owner = savedRuns.get(run.id) || this.knownRuns.get(run.id) || this.get<Run | StoredRun>('runs', run.id)?.taskId;
-          if (run.taskId !== task.id || (owner && owner !== task.id)) throw new Error('轮次记录不属于当前任务，拒绝覆盖历史');
-          if (owner) this.knownRuns.set(run.id, owner);
-          if (runIds && !runIds.has(run.id) && owner) continue;
-          const { changes, ...data } = run;
-          this.write('runs', run.id, { ...data, changeIds: changes.map(change => change.id) });
-          for (const change of changes) { if (change.runId !== run.id) throw new Error('检查点不属于当前轮次，拒绝覆盖历史'); this.write('checkpoints', change.id, change); }
-          savedRuns.set(run.id, task.id);
-        }
-        this.writeCatalog(task, runIds);
+    const heads = new Map<string, HistoryHead>(), savedRuns = new Map<string, string>();
+    for (const { task, runIds } of this.pending.values()) {
+      let head = this.heads.get(task.id);
+      if (!head) {
+        const row = this.db.prepare('SELECT seq,id FROM task_events WHERE task_id=? ORDER BY seq DESC LIMIT 1').get(task.id);
+        head = { length: row ? Number(row.seq) + 1 : 0, lastId: row ? String(row.id) : undefined };
       }
-      this.db.run('COMMIT');
-      for (const [id, head] of heads) this.heads.set(id, head);
-      for (const [id, owner] of savedRuns) this.knownRuns.set(id, owner);
-    } catch (error) { this.db.run('ROLLBACK'); this.dirty = dirty; throw error; }
+      if (task.events.length < head.length || (head.length && task.events[head.length - 1].id !== head.lastId)) throw new Error('任务历史不能截短或重排，请重新读取完整任务');
+      const statement = this.db.prepare('INSERT INTO task_events (task_id,seq,id,data) VALUES (?,?,?,?)');
+      for (let i = head.length; i < task.events.length; i++) statement.run(task.id, i, task.events[i].id, JSON.stringify(task.events[i]));
+      heads.set(task.id, { length: task.events.length, lastId: task.events.at(-1)?.id });
+      const { events, runs, eventCount, userRequests, ...data } = task;
+      if (runIds && [...runIds].some(id => !runs?.some(run => run.id === id))) throw new Error('待保存的轮次不存在，拒绝丢失修改');
+      this.write('tasks', task.id, { ...data, historyLength: events.length, ...(runs ? { runIds: runs.map(run => run.id) } : {}) });
+      for (const run of runs || []) {
+        const owner = savedRuns.get(run.id) || this.knownRuns.get(run.id) || this.get<Run | StoredRun>('runs', run.id)?.taskId;
+        if (run.taskId !== task.id || (owner && owner !== task.id)) throw new Error('轮次记录不属于当前任务，拒绝覆盖历史');
+        if (runIds && !runIds.has(run.id) && owner) continue;
+        const { changes, ...data } = run;
+        this.write('runs', run.id, { ...data, changeIds: changes.map(change => change.id) });
+        for (const change of changes) { if (change.runId !== run.id) throw new Error('检查点不属于当前轮次，拒绝覆盖历史'); this.write('checkpoints', change.id, change); }
+        savedRuns.set(run.id, task.id);
+      }
+      this.writeCatalog(task, runIds);
+    }
+    return { heads, savedRuns };
   }
   private writeCatalog(task: Task, changedRuns?: Set<string>) {
     const { messages, events, runs, changes, eventCount, userRequests, ...data } = task;
@@ -226,33 +229,38 @@ export class Store {
     });
     const view = { ...data, runs: views, changes: changes.map(changeView) };
     const recovery = (!runs?.length && !task.legacy) || busyStatuses.includes(task.status) || views.some(run => busyStatuses.includes(run.status) || (run.progress && !run.progress.endedAt) || run.changes.some(change => change.state === 'prepared'));
-    this.db.run('INSERT INTO task_catalog (id,project_id,archived,title,data,view,requests,recovery) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,archived=excluded.archived,title=excluded.title,data=excluded.data,view=excluded.view,requests=excluded.requests,recovery=excluded.recovery WHERE data<>excluded.data OR view<>excluded.view OR requests<>excluded.requests OR recovery<>excluded.recovery',
-      [task.id, task.projectId, Number(!!task.archivedAt), task.title.toLocaleLowerCase(), JSON.stringify(taskSummary(task, 0)), JSON.stringify(view), JSON.stringify([...requestTexts(task)].map(text => text.toLocaleLowerCase())), Number(recovery)]);
-    if (this.db.getRowsModified()) this.dirty = true;
+    this.db.prepare('INSERT INTO task_catalog (id,project_id,archived,title,data,view,requests,recovery) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,archived=excluded.archived,title=excluded.title,data=excluded.data,view=excluded.view,requests=excluded.requests,recovery=excluded.recovery WHERE data<>excluded.data OR view<>excluded.view OR requests<>excluded.requests OR recovery<>excluded.recovery').run(
+      task.id, task.projectId, Number(!!task.archivedAt), task.title.toLocaleLowerCase(), JSON.stringify(taskSummary(task, 0)), JSON.stringify(view), JSON.stringify([...requestTexts(task)].map(text => text.toLocaleLowerCase())), Number(recovery));
   }
   putSettings(settings: Settings) { this.put('settings', 'default', settings); }
   evaluations() { return this.all<EvaluationReport>('evaluations').sort((a, b) => b.createdAt - a.createdAt).slice(0, 10); }
   private saveEvaluation(report: EvaluationReport) {
     this.write('evaluations', report.id, report);
     const keep = new Set(this.evaluations().map(r => r.id));
-    for (const old of this.all<EvaluationReport>('evaluations')) if (!keep.has(old.id)) { this.db.run('DELETE FROM evaluations WHERE id = ?', [old.id]); this.dirty = true; }
+    for (const old of this.all<EvaluationReport>('evaluations')) if (!keep.has(old.id)) this.db.prepare('DELETE FROM evaluations WHERE id = ?').run(old.id);
   }
-  putEvaluation(report: EvaluationReport) { this.saveEvaluation(report); this.flush(); }
+  putEvaluation(report: EvaluationReport) { this.put('evaluations', report.id, report); }
   flush() {
     clearTimeout(this.timer); this.timer = undefined;
+    if (!this.pending.size && !this.records.size && !this.metadata.size) return;
+    let transaction = false;
     try {
-      this.writeTasks();
-      if (this.dirty) {
-        const temp = this.file + '.tmp';
-        const fd = fs.openSync(temp, 'w', 0o600);
-        try { fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, this.db.export()); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-        fs.renameSync(temp, this.file);
-        const directory = fs.openSync(path.dirname(this.file), fs.constants.O_RDONLY);
-        try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
-        this.dirty = false;
+      this.db.exec('BEGIN IMMEDIATE'); transaction = true;
+      const { heads, savedRuns } = this.writeTasks();
+      for (const { table, id, value } of this.records.values()) {
+        if (table === 'evaluations') this.saveEvaluation(value as EvaluationReport);
+        else this.write(table, id, value);
       }
-      this.pending.clear();
+      for (const [id, patch] of this.metadata) this.writeMetadata(id, patch);
+      // FULL WAL commits are the durability boundary for checkpoint/approval
+      // acknowledgements. No full-database export or per-save checkpoint needed.
+      this.db.exec('COMMIT'); transaction = false;
+      for (const [id, head] of heads) this.heads.set(id, head);
+      for (const [id, owner] of savedRuns) this.knownRuns.set(id, owner);
+      for (const [id, patch] of this.metadata) { const pending = this.pending.get(id); if (pending) Object.assign(pending.task, patch); }
+      this.pending.clear(); this.records.clear(); this.metadata.clear();
     } catch (error) {
+      if (transaction) try { this.db.exec('ROLLBACK'); } catch { /* Preserve the original failure. */ }
       // Synchronous saves also drain deferred tasks, so notify them on every failure path.
       const failure = error instanceof Error ? error : new Error(String(error));
       const callbacks = new Set([...this.pending.values()].map(entry => entry.onError));

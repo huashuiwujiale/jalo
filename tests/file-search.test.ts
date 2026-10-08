@@ -97,7 +97,7 @@ test('entry budget bounds enumeration, reports incomplete results, and closes ha
     const budget = { maxEntries: 20, visited: 0, truncated: false }, files: string[] = [];
     for await (const file of walkSearchFiles(x.tools, '.', budget)) files.push(file);
     assert.equal(files.length, 20); assert.equal(budget.visited, 21); assert.equal(budget.truncated, true);
-    assert.equal(handles.length, 1); await assert.rejects(handles[0].read(), { code: 'ERR_DIR_CLOSED' });
+    assert.equal(handles.length, 1); await assert.rejects(async () => handles[0].read(), { code: 'ERR_DIR_CLOSED' });
     assert.equal((await new FileNameIndex({ maxEntries: 20 }).search(x.root, 'absent', x.tools)).truncated, true);
   } finally { t.mock.restoreAll(); await x.cleanup(); }
 });
@@ -156,7 +156,7 @@ test('model filename search avoids per-file resolution and stops before queued s
     const result = await x.tools.execute('search_files', { query: 'HIT', mode: 'name' });
     assert.equal(result.split('\n').filter(line => line.endsWith('.ts')).length, 50);
     assert.match(result, /上限/); assert.equal(opens, 1); assert.ok(resolves < 10);
-    await assert.rejects(handles[0].read(), { code: 'ERR_DIR_CLOSED' });
+    await assert.rejects(async () => handles[0].read(), { code: 'ERR_DIR_CLOSED' });
   } finally { t.mock.restoreAll(); await x.cleanup(); }
 });
 

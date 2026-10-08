@@ -6,6 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { DatabaseSync } from 'node:sqlite';
 import { defaults } from '../shared/types';
 import { version, checkSyntax } from '../engine/syntax';
 import { emptyView, viewKey } from '../shared/session';
@@ -29,10 +30,10 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
   let flushes = 0, failWrites = false;
   Store.prototype.flush = function () {
     flushes++;
-    const db = (this as any).db, originalExport = db.export;
-    if (failWrites) db.export = () => { throw new Error('模拟磁盘写入失败'); };
+    const db = (this as any).db, originalExec = db.exec;
+    if (failWrites) db.exec = function (sql: string) { if (/^COMMIT\b/.test(sql)) throw new Error('模拟磁盘写入失败'); return originalExec.call(this, sql); };
     try { return originalFlush.call(this); }
-    finally { db.export = originalExport; }
+    finally { db.exec = originalExec; }
   };
   const app=new EventEmitter() as any;
   Object.assign(app,{getVersion:()=> '9.8.7',isPackaged:false,getPath:(key:string)=>key==='userData'?userData:home,setPath:(_k:string,v:string)=>userData=v,setName:()=>{},setAboutPanelOptions:(value:any)=>about=value,requestSingleInstanceLock:()=>true,whenReady:()=>Promise.resolve(),quit:()=>{}});
@@ -196,8 +197,8 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const w=workers.at(-1), change={id:randomUUID(),runId:second.id,path:'a.txt',before:'old',after:'new',beforeVersion:version('old'),afterVersion:version('new'),check:checkSyntax('a.txt','new'),state:'prepared',patch:'-old\n+new'};
     w.emit('message',{type:'checkpoint',runId:second.id,checkpoint:change});
     assert.ok(w.sent.some((m:any)=>m.type==='checkpoint-ack'&&m.id===change.id));
-    const SQL=await require('sql.js')();const db=new SQL.Database(await fs.readFile(path.join(userData,'local-code.sqlite')));assert.equal(db.exec('SELECT count(*) FROM checkpoints')[0].values[0][0],1);
-    const stored=JSON.parse(db.exec('SELECT data FROM tasks WHERE id=?',[taskId])[0].values[0][0]);
+    const db=new DatabaseSync(path.join(userData,'local-code.sqlite'),{readOnly:true});assert.equal(db.prepare('SELECT count(*) AS count FROM checkpoints').get()!.count,1);
+    const stored=JSON.parse(String(db.prepare('SELECT data FROM tasks WHERE id=?').get(taskId)!.data));
     assert.deepEqual(stored.messages,[...planMessages,...linkedMessages]);db.close();
     await fs.writeFile(path.join(root,'a.txt'),'new');w.emit('message',{type:'change',runId:second.id,change:{path:'a.txt',before:'old',after:'new',patch:change.patch},checkpoint:{...change,state:'written'}});
     const patch=await invoke('changes:patch',{taskId,runId:second.id,path:'a.txt'});assert.equal(patch.patch,change.patch);
@@ -279,10 +280,9 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const renameTask=(await snapshot()).tasks.find((t:any)=>t.id===renameId), renameWorker=workers.at(-1);
     const waitingId=await invoke('task:submit',{projectId:project.id,prompt:'wait for storage recovery'}), beforeFailure=workers.length;
     renameWorker.emit('message',{type:'event',runId:renameTask.currentRunId,event:{id:randomUUID(),at:Date.now(),kind:'notice',text:'pending history'}});
-    const blocked=path.join(userData,'local-code.sqlite.tmp');
-    await fs.mkdir(blocked);
+    failWrites=true;
     try {
-      await assert.rejects(invoke('task:rename',{taskId:renameId,title:'renamed during save'}),/EISDIR/);
+      await assert.rejects(invoke('task:rename',{taskId:renameId,title:'renamed during save'}),/模拟磁盘写入失败/);
       assert.ok(renameWorker.killed);
       const stopped=(await snapshot()).tasks.find((t:any)=>t.id===renameId);
       assert.equal(stopped.status,'failed'); assert.match(stopped.error,/保存失败/);
@@ -290,7 +290,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
       await new Promise(r=>setTimeout(r,taskSaveDelay+30));
       assert.equal(workers.length,beforeFailure);
       assert.equal((await snapshot()).tasks.find((t:any)=>t.id===waitingId).status,'queued');
-    } finally { await fs.rm(blocked,{recursive:true,force:true}); }
+    } finally { failWrites=false; }
     await invoke('task:stop',waitingId);
     await invoke('task:submit',{projectId:project.id,taskId:renameId,prompt:'storage recovered; continue manually'});
     const retried=(await snapshot()).tasks.find((t:any)=>t.id===renameId);
@@ -304,8 +304,8 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.ok(gapWorker.killed);
     const gapResult=(await snapshot()).tasks.find((t:any)=>t.id===gapId);
     assert.equal(gapResult.status,'failed');assert.match(gapResult.error,/同步顺序/);
-    const gapDb=new SQL.Database(await fs.readFile(path.join(userData,'local-code.sqlite')));
-    const gapStored=JSON.parse(gapDb.exec('SELECT data FROM tasks WHERE id=?',[gapId])[0].values[0][0]);
+    const gapDb=new DatabaseSync(path.join(userData,'local-code.sqlite'),{readOnly:true});
+    const gapStored=JSON.parse(String(gapDb.prepare('SELECT data FROM tasks WHERE id=?').get(gapId)!.data));
     assert.equal(gapStored.messages.length,1);assert.equal(gapStored.messages[0].content,'message protocol gap');gapDb.close();
   } finally { failWrites=false;Store.prototype.flush=originalFlush;Store.prototype.task=originalTask;Store.prototype.tasks=originalTasks;Store.prototype.detail=originalDetail;Module._load=original;app.emit('before-quit');await fs.rm(home,{recursive:true,force:true}); }
 });

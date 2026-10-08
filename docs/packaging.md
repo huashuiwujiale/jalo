@@ -75,7 +75,7 @@ codesign --verify --deep --strict --verbose=2 release/mac-arm64/Jalo.app
 ## 5. 安装或更新
 
 1. 完成或停止正在运行、等待确认及排队中的任务。
-2. 在 Jalo 的“模型与设置 → 应用与诊断 → 打开数据目录”查看实际数据位置。退出 Jalo，将整个目录复制一份备份，包含数据库、`backups/`、`recovery/` 和 `ui-session.json`（如存在）。
+2. 在 Jalo 的“模型与设置 → 应用与诊断 → 打开数据目录”查看实际数据位置。退出 Jalo，将整个目录复制一份备份，包含数据库、`backups/`、`recovery/` 和 `ui-session.json`（如存在）。如果仍有数据库的 `-wal`、`-shm` 文件，也须一并复制，不能仅复制主数据库或删除 WAL。
 3. 双击 `release/Jalo-0.2.1-mac-arm64.dmg`，把 Jalo 拖入 Applications；已有安装时选择替换。
 4. 推出镜像，从“应用程序”打开 Jalo，在“应用与诊断”确认版本为 `0.2.1` 且为安装版。
 5. 核对项目、历史任务和草稿，再连接 LM Studio。
