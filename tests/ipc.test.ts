@@ -152,11 +152,18 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const historyTask=(await snapshot()).tasks[0];assert.equal(historyTask.events.length,100);assert.ok(historyTask.eventCount>600);assert.equal(historyTask.runs[0].hasPlan,true);assert.ok(!('planText' in historyTask.runs[0]));assert.equal(await invoke('runs:plan',{taskId,runId:run.id}),savedPlan);
     await assert.rejects(invoke('task:events',{taskId:randomUUID()}),/任务不存在/);
     await assert.rejects(invoke('task:events',{taskId,before:'wrong-cursor'}),/游标不存在/);
+    for(const direction of ['after','around'])await assert.rejects(invoke('task:events',{taskId,[direction]:'wrong-cursor'}),/游标不存在/);
+    for(const cursors of [{before:'one',after:'two'},{before:'one',around:'two'},{after:'one',around:'two'}])await assert.rejects(invoke('task:events',{taskId,...cursors}),/一个方向/);
+    for(const cursors of [{after:''},{around:'x'.repeat(201)},{before:5}])await assert.rejects(invoke('task:events',{taskId,...cursors}));
     await assert.rejects(invoke('task:events',{taskId,extra:true}));
     await assert.rejects(handlers.get('task:events')!({sender:{},senderFrame:{}},{taskId}),/无效的调用来源/);
     let historyPage=await invoke('task:events',{taskId}), loadedEvents=historyPage.events;
     while(historyPage.hasMore){historyPage=await invoke('task:events',{taskId,before:historyPage.events[0].id});loadedEvents=[...historyPage.events,...loadedEvents];}
     assert.equal(loadedEvents.length,historyTask.eventCount);assert.equal(loadedEvents[0].role,'user');
+    const directPage=await invoke('task:events',{taskId,around:loadedEvents[250].id});
+    assert.equal(directPage.start,200);assert.deepEqual(directPage.events,loadedEvents.slice(200,300));
+    const nextPage=await invoke('task:events',{taskId,after:directPage.events.at(-1).id});
+    assert.equal(nextPage.start,300);assert.deepEqual(nextPage.events,loadedEvents.slice(300,400));
     assert.ok((await snapshot()).tasks[0].runs[0].progress.endedAt);
     await invoke('task:archive',{taskId,archived:true});
     const archived=(await snapshot()).tasks[0];assert.ok(archived.archivedAt);assert.equal(archived.runs[0].status,'completed');

@@ -1,0 +1,5 @@
+.task-history-window { position:relative; }
+.task-history-rows { position:absolute; inset:0 0 auto; }
+.task-history-row { height:60px; }
+.task-history-row .task-item { height:58px; margin-bottom:0; }
+.task-history-row .history-actions { flex-shrink:0; }

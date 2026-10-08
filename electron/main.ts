@@ -267,9 +267,12 @@ function registerApi() {
     return searchTaskIds(tasks, input.projectId, input.archived, input.query);
   });
   register('task:events', (raw: unknown) => {
-    const input = z.object({ taskId: uuid, before: z.string().min(1).max(200).optional() }).strict().parse(raw);
+    const cursor = z.string().min(1).max(200).optional();
+    const input = z.object({ taskId: uuid, before: cursor, after: cursor, around: cursor }).strict()
+      .refine(value => [value.before, value.after, value.around].filter(id => id !== undefined).length <= 1, '历史记录游标只能指定一个方向').parse(raw);
     const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
-    return pageTaskEvents(task, input.before);
+    const direction = input.around !== undefined ? { around: input.around } : input.after !== undefined ? { after: input.after } : { before: input.before };
+    return pageTaskEvents(task, direction);
   });
   register('settings:save', (raw: unknown) => {
     idleRequired(); const value = settingsSchema.parse(raw);

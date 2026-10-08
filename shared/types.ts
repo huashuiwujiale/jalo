@@ -33,6 +33,10 @@ export interface Change { path: string; before: string | null; after: string; pa
 export interface Approval { id: string; command: string; cwd: string; timeout: number }
 export interface Event { id: string; at: number; kind: 'message' | 'tool' | 'output' | 'notice' | 'error'; text: string; role?: string; runId?: string; toolCallId?: string; toolPhase?: 'call' | 'result' | 'error' }
 export interface EventPage { events: Event[]; start: number; hasMore: boolean; total: number }
+export type EventCursor =
+  | { before?: string; after?: never; around?: never }
+  | { before?: never; after: string; around?: never }
+  | { before?: never; after?: never; around: string };
 export interface RunEvidence { successfulTools: string[]; changedFiles: string[] }
 export interface Task {
   archivedAt?: number;
@@ -85,7 +89,7 @@ export interface Api {
   removeProject(projectId: string): Promise<void>;
   renameTask(taskId: string, title: string): Promise<void>;
   archiveTask(taskId: string, archived: boolean): Promise<void>;
-  taskEvents(input: { taskId: string; before?: string }): Promise<EventPage>;
+  taskEvents(input: { taskId: string } & EventCursor): Promise<EventPage>;
   taskDetail(taskId: string): Promise<TaskDetail>;
   searchTasks(input: { projectId: string; archived: boolean; query: string }): Promise<string[]>;
   planText(taskId: string, runId: string): Promise<string>;

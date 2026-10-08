@@ -1,11 +1,52 @@
-import type { EventPage, Run, Task } from './types';
+import type { Event, EventCursor, EventPage, Run, Task } from './types';
 export const historyPageSize = 100;
 
+interface EventIndex { events: Event[]; length: number; first?: string; last?: string; positions: Map<string, number> }
+const eventIndexes = new WeakMap<Task, EventIndex>();
+
+function eventPosition(task: Task, id: string): number {
+  const events = task.events;
+  let index = eventIndexes.get(task);
+  if (!index || index.events !== events || index.length > events.length ||
+    index.first !== events[0]?.id || index.last !== events[index.length - 1]?.id) {
+    index = { events, length: 0, positions: new Map() };
+    eventIndexes.set(task, index);
+  }
+  for (let i = index.length; i < events.length; i++) {
+    const eventId = events[i].id;
+    if (!index.positions.has(eventId)) index.positions.set(eventId, i);
+  }
+  index.length = events.length; index.first = events[0]?.id; index.last = events.at(-1)?.id;
+  let position = index.positions.get(id);
+  // Normal history only appends. Verify cached entries and rebuild on an edited ID.
+  if (position === undefined || events[position]?.id !== id) {
+    index.positions.clear();
+    for (let i = 0; i < events.length; i++) {
+      const eventId = events[i].id;
+      if (!index.positions.has(eventId)) index.positions.set(eventId, i);
+    }
+    position = index.positions.get(id);
+  }
+  if (position === undefined) throw new Error('历史记录游标不存在，请重新打开任务');
+  return position;
+}
+
 /** IDs are cursors: timestamps can coincide and live events only append. */
-export function pageTaskEvents(task: Task, before?: string): EventPage {
-  const end = before === undefined ? task.events.length : task.events.findIndex(e => e.id === before);
-  if (end < 0) throw new Error('历史记录游标不存在，请重新打开任务');
-  const start = Math.max(0, end - historyPageSize);
+export function pageTaskEvents(task: Task, cursor: string | EventCursor = {}): EventPage {
+  const input = typeof cursor === 'string' ? { before: cursor } : cursor;
+  if ([input.before, input.after, input.around].filter(value => value !== undefined).length > 1) throw new Error('历史记录游标只能指定一个方向');
+  let start: number, end: number;
+  if (input.after !== undefined) {
+    start = eventPosition(task, input.after) + 1;
+    end = Math.min(task.events.length, start + historyPageSize);
+  } else if (input.around !== undefined) {
+    const position = eventPosition(task, input.around);
+    end = Math.min(task.events.length, Math.max(0, position - Math.floor(historyPageSize / 2)) + historyPageSize);
+    start = Math.max(0, end - historyPageSize);
+  } else {
+    end = input.before === undefined ? task.events.length : eventPosition(task, input.before);
+    start = Math.max(0, end - historyPageSize);
+  }
   return { events: task.events.slice(start, end), start, hasMore: start > 0, total: task.events.length };
 }
 

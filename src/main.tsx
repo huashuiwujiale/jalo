@@ -17,7 +17,7 @@ import { TaskHistory, RemoveProjectDialog } from './task-history';
 import { AppMaintenance } from './app-maintenance';
 import { ModelEvaluation } from './model-evaluation';
 import { emptySession, emptyView, rememberView, restoreView, viewKey, type SessionView } from '../shared/session';
-import { capturePosition, restorePosition } from './session-scroll';
+import { capturePosition, restorePosition, rememberExpanded } from './session-scroll';
 import { useEventHistory } from './event-history';
 import { HistoryControls, PlanActions } from './history-controls';
 import { ViewSaver } from './view-saver';
@@ -50,6 +50,8 @@ function App() {
   const conversation = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const previousScrollTop = useRef(0);
+  const expanded = useRef(new Set<string>());
+  const expandedGroups = useRef(new Map<string, string[]>());
   const scrollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const saver = useRef<ViewSaver | undefined>(undefined);
   saver.current ??= new ViewSaver(view => api.saveView(view), view => rememberView(sessions.current, view), e => fail(e));
@@ -91,7 +93,7 @@ function App() {
   const task = detail.task;
   const fail = (e: unknown) => setError((e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': Error: /, ''));
   const history = useEventHistory(task, api, pendingPosition.current?.follow === false ? pendingPosition.current.anchor : undefined, () => {
-    if (!pendingPosition.current) { pendingPosition.current = capturePosition(conversation.current, followLatest.current); setViewRevision(n => n + 1); }
+    if (!pendingPosition.current) { pendingPosition.current = captureCurrent(); setViewRevision(n => n + 1); }
   }, e => fail(e));
   const isBusy = !!selected && busyStatuses.includes(selected.status);
   const evaluating = state.evaluations?.some(r => r.status === 'running');
@@ -99,6 +101,15 @@ function App() {
   const run = task?.runs?.find(r => r.id === runId) || task?.runs?.at(-1);
   const invalidReferences = references.some(r => r.projectId !== projectId);
   const projectBusy = state.tasks.some(t => t.projectId === projectId && busyStatuses.includes(t.status));
+  function captureCurrent() {
+    const scroll = capturePosition(conversation.current, followLatest.current, [...expanded.current], expandedGroups.current);
+    expanded.current = new Set(scroll.expanded); return scroll;
+  }
+  async function returnToLatest() {
+    if (!history.hasLater) { scrollToLatest(); return; }
+    pendingPosition.current = { ...captureCurrent(), top: 0, follow: true, anchor: undefined, offset: undefined };
+    setViewRevision(n => n + 1); await history.loadLatest();
+  }
   function persistView(view: SessionView) {
     saver.current!.schedule(view);
   }
@@ -109,12 +120,14 @@ function App() {
   function rememberCurrent() {
     clearTimeout(scrollTimer.current); scrollTimer.current = undefined;
     if (!sessionReady || pendingPosition.current) return;
-    const view = { ...currentView.current, scroll: capturePosition(conversation.current, followLatest.current) };
+    const view = { ...currentView.current, scroll: captureCurrent() };
     currentView.current = view; persistView(view);
   }
   function openView(view: SessionView, saveCurrent = true) {
     if (saveCurrent) { rememberCurrent(); saver.current!.flush(); }
     currentView.current = view; pendingPosition.current = view.scroll;
+    expanded.current = new Set(view.scroll.expanded);
+    expandedGroups.current.clear();
     setProjectId(view.projectId); setTaskId(view.taskId); setPrompt(view.prompt); setMode(view.mode); setReferences(view.references);
     setRunId(view.runId); setTab(view.tab); setPicker(undefined); setSelectedFile(''); setError('');
     setViewRevision(value => value + 1);
@@ -138,11 +151,12 @@ function App() {
   }, []);
   useLayoutEffect(() => {
     const element=conversation.current, saved=pendingPosition.current;
-    if (!sessionReady || !element || !saved || (taskId && !task) || history.restoring) return;
+    if (!sessionReady || !element || !saved || (taskId && !task) || history.restoring || history.loading) return;
     pendingPosition.current=undefined; followLatest.current=saved.follow;
     previousScrollTop.current=restorePosition(element,saved);restoredTop.current=element.scrollTop;
     setShowLatest(!saved.follow);
-  }, [sessionReady, viewRevision, history.restoring, history.events.length, task?.id]);
+    setViewRevision(n => n + 1);
+  }, [sessionReady, viewRevision, history.restoring, history.loading, history.events, task?.id]);
   useLayoutEffect(() => {
     if (!sessionReady) return;
     currentView.current = { projectId,taskId,prompt,mode,references,runId,tab,scroll:pendingPosition.current || currentView.current.scroll };
@@ -152,7 +166,7 @@ function App() {
     if (!sessionReady) return;
     const flush = () => {
       clearTimeout(scrollTimer.current); scrollTimer.current = undefined;
-      saver.current!.close({ ...currentView.current, scroll:pendingPosition.current || capturePosition(conversation.current,followLatest.current) }, view => api.flushView(view));
+      saver.current!.close({ ...currentView.current, scroll:pendingPosition.current || captureCurrent() }, view => api.flushView(view));
     };
     window.addEventListener('beforeunload',flush);
     return () => { window.removeEventListener('beforeunload',flush); flush(); };
@@ -207,7 +221,7 @@ function App() {
     <main className="workspace">
       <header className="topbar"><div className="breadcrumb"><Folder size={15}/><span>{project?.name || '选择工作空间'}</span><span className="slash">/</span><strong>{task ? '任务详情' : '新建任务'}</strong></div><button className="model-pill" onClick={() => setSettingsOpen(true)}><span className={state.settings.model ? 'green-dot' : 'gray-dot'}/><span>{state.settings.model || '连接本地模型'}</span><ChevronDown size={13}/></button></header>
       <div className="conversation-pane">
-      <div className="conversation" key={viewKey(projectId,taskId)} ref={conversation} onScroll={handleConversationScroll} onToggleCapture={() => schedulePosition()}
+      <div className="conversation" key={viewKey(projectId,taskId)} ref={conversation} onScroll={handleConversationScroll} onToggleCapture={event => { if (event.target instanceof HTMLDetailsElement) rememberExpanded(event.target, expanded.current, expandedGroups.current); schedulePosition(); }}
         onWheel={event => { if (event.deltaY < 0) pauseFollowing(); }}
         onKeyDown={event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) pauseFollowing(); }}
         onClickCapture={event => { if ((event.target as HTMLElement).closest('summary')) pauseFollowing(); }}
@@ -217,8 +231,9 @@ function App() {
           </div><div className="welcome-foot"><ShieldCheck size={14}/>项目内自动编辑 · 终端命令逐次确认</div></section> : <div className="timeline"><div className="task-heading"><span className={`status-tag ${task.status}`}>{statusText[task.status]}</span><span>{new Date(task.createdAt).toLocaleString('zh-CN')}</span></div>
           <HistoryControls hasMore={history.hasMore} loading={history.loading} incomplete={task.historyIncomplete} load={() => { pauseFollowing(); void history.loadEarlier(); }}/>
           {detail.error && <div className="task-error" role="alert">任务记录加载失败：{detail.error}<button onClick={detail.retry}>重试</button></div>}
-          <TimelineRows events={history.events} busy={isBusy} runId={task.currentRunId} waiting={task.status === 'waiting'}/>
-          {task.currentRunId && <StreamingReply key={`${task.id}:${task.currentRunId}`} api={api} taskId={task.id} runId={task.currentRunId} initial={task.stream} onContent={() => { if (followLatest.current && !pendingPosition.current) scrollToLatest(false); }}/>}
+          <TimelineRows events={history.events} busy={isBusy} runId={task.currentRunId} waiting={task.status === 'waiting'} viewport={conversation} position={pendingPosition.current} expanded={expanded} following={() => followLatest.current} corrected={top => { restoredTop.current = top; previousScrollTop.current = top; }}/>
+          {history.hasLater && <div className="history-pagination"><button className="outline" disabled={history.loading} onClick={() => { pauseFollowing(); void history.loadLater(); }}>加载较新记录</button><button className="outline" disabled={history.loading} onClick={() => void returnToLatest()}>回到最新</button></div>}
+          {!history.hasLater && task.currentRunId && <StreamingReply key={`${task.id}:${task.currentRunId}`} api={api} taskId={task.id} runId={task.currentRunId} initial={task.stream} onContent={() => { if (followLatest.current && !pendingPosition.current) scrollToLatest(false); }}/>}
           <RecoveryPanel task={task} disabled={sending || composerLocked} resume={() => {
             const latest = task.runs?.find(r => r.id === task.currentRunId) || task.runs?.at(-1);
             setMode(latest?.mode || task.mode || 'execute');
@@ -231,7 +246,7 @@ function App() {
 
           </div>}
       </div>
-        {task && showLatest && <div className="latest-row"><button className="latest-button" onClick={() => scrollToLatest()}><ChevronDown size={14}/>回到最新</button></div>}
+        {task && (showLatest || history.hasLater) && <div className="latest-row"><button className="latest-button" disabled={history.loading} onClick={() => void returnToLatest()}><ChevronDown size={14}/>回到最新</button></div>}
       </div>
       <div className="composer-area">
         {evaluating && <div className="archived-banner"><span>模型能力实测中，完成或停止后可提交任务。</span><button onClick={() => setSettingsOpen(true)}>查看实测</button></div>}

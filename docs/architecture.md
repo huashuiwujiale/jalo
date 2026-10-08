@@ -63,10 +63,10 @@ jalo/
 | --- | --- |
 | `main.tsx` | React 入口和整体页面；组织项目选择、任务提交、设置与三栏界面 |
 | `style.css` | 页面布局、配色和组件样式 |
-| `task-history.tsx` | 历史任务列表、搜索、重命名、归档及项目移除确认 |
+| `task-history.tsx`、`task-list-window.ts` | 任务列表按视口挂载、键盘导航、搜索、重命名、归档及项目移除确认 |
 | `task-detail.ts` | 按需加载当前任务详情，处理切换任务时的过期响应 |
-| `event-history.ts`、`history-controls.tsx` | 历史事件分页、加载更早记录与保存的计划入口 |
-| `timeline-rows.tsx`、`tool-card.tsx`、`tool-events.ts` | 聊天时间线、工具卡片及调用/结果分组 |
+| `event-history.ts`、`history-controls.tsx` | 按事件 ID 直达分页、前后翻页、最多缓存 600 条事件与保存的计划入口 |
+| `timeline-rows.tsx`、`timeline-window.ts`、`tool-card.tsx`、`tool-events.ts` | 按实测高度挂载可见聊天行、保存阅读锚点与工具卡展开状态、调用/结果分组 |
 | `streaming-reply.tsx` | 流式文字累积与展示，处理重复或过期片段 |
 | `task-progress.tsx`、`context-usage.tsx` | 当前执行阶段、失败恢复提示和上下文用量 |
 | `mention-input.tsx`、`mentions.ts` | 输入框中的 `@` 文件候选与引用交互 |

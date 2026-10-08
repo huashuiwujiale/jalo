@@ -40,6 +40,50 @@ test('stable ID pages retain every event exactly once while newer events append'
   assert.deepEqual(pageTaskEvents(task([])), { events: [], start: 0, hasMore: false, total: 0 });
 });
 
+test('event ID pages jump directly around distant anchors and page forward without overlap', () => {
+  const full = task(events(1001));
+  const middle = pageTaskEvents(full, { around: 'event-450' });
+  assert.equal(middle.start, 400); assert.equal(middle.events.length, 100);
+  assert.equal(middle.events[50].id, 'event-450'); assert.equal(middle.hasMore, true);
+  const next = pageTaskEvents(full, { after: middle.events.at(-1)!.id });
+  assert.deepEqual(next.events, full.events.slice(500, 600)); assert.equal(next.start, 500);
+  const earlier = pageTaskEvents(full, { before: middle.events[0].id });
+  assert.deepEqual(earlier.events, full.events.slice(300, 400));
+  assert.equal(pageTaskEvents(full, { around: 'event-0' }).start, 0);
+  assert.equal(pageTaskEvents(full, { around: 'event-1000' }).start, 901);
+  assert.deepEqual(pageTaskEvents(full, { after: 'event-1000' }), { events: [], start: 1001, hasMore: true, total: 1001 });
+  assert.deepEqual(pageTaskEvents(full, { before: 'event-0' }), { events: [], start: 0, hasMore: false, total: 1001 });
+  for (const cursor of [{ around: 'missing' }, { after: 'missing' }]) assert.throws(() => pageTaskEvents(full, cursor), /游标不存在/);
+  assert.throws(() => pageTaskEvents(full, { before: 'event-0', after: 'event-1' } as any), /一个方向/);
+  assert.throws(() => pageTaskEvents(task([]), { around: 'missing' }), /游标不存在/);
+  assert.deepEqual(pageTaskEvents(task(events(12)), { around: 'event-8' }).events, events(12));
+});
+
+test('event ID index reuses cursor lookups, indexes only appended events, and handles history resets', () => {
+  let reads = 0;
+  const tracked = (id: string): Event => ({ ...event(id), get id() { reads++; return id; } });
+  const full = task(Array.from({ length: 10000 }, (_, i) => tracked(`event-${i}`)));
+  assert.equal(pageTaskEvents(full, { around: 'event-5000' }).start, 4950);
+  reads = 0;
+  for (let i = 0; i < 20; i++) pageTaskEvents(full, { around: `event-${4000 + i}` });
+  assert.ok(reads < 200, `cached lookups read ${reads} IDs`);
+  full.events.push(tracked('new-1'), tracked('new-2')); reads = 0;
+  assert.equal(pageTaskEvents(full, { after: 'event-9999' }).events.length, 2);
+  assert.equal(pageTaskEvents(full, { around: 'new-2' }).events.at(-1)!.id, 'new-2');
+  assert.ok(reads < 30, `append lookup read ${reads} IDs`);
+  full.events = events(12);
+  assert.equal(pageTaskEvents(full, { around: 'event-8' }).start, 0);
+  assert.throws(() => pageTaskEvents(full, { around: 'new-2' }), /游标不存在/);
+  full.events.length = 4;
+  assert.equal(pageTaskEvents(full, { around: 'event-3' }).events.length, 4);
+  full.events[1] = event('replacement');
+  assert.equal(pageTaskEvents(full, { around: 'replacement' }).events[1].id, 'replacement');
+  assert.throws(() => pageTaskEvents(full, { around: 'event-1' }), /游标不存在/);
+  full.events = [];
+  assert.deepEqual(pageTaskEvents(full), { events: [], start: 0, hasMore: false, total: 0 });
+  assert.throws(() => pageTaskEvents(full, { after: 'event-0' }), /游标不存在/);
+});
+
 test('loaded history survives live updates, fills skipped snapshot gaps, and rebuilds tool cards', async () => {
   const full = task(events(250));
   full.events[149] = event('call', { kind: 'tool', text: 'read_file {}', toolCallId: 'tool', toolPhase: 'call', runId: 'r' });
@@ -162,7 +206,7 @@ test('prepending history restores the reading anchor and expanded card even afte
     const saved = { top: 200, follow: false, anchor: 'result', offset: -12, expanded: ['result'] };
     assert.equal(restorePosition(panel as any, saved), 612); assert.equal(rows[0].open, true);
     const captured = capturePosition(panel as any, false);
-    assert.equal(captured.anchor, 'call'); assert.equal(captured.offset, -12); assert.deepEqual(captured.expanded, ['call']);
+    assert.equal(captured.anchor, 'call'); assert.equal(captured.offset, -12); assert.deepEqual(captured.expanded, ['call', 'result', 'error']);
     assert.equal(restorePosition(panel as any, { ...saved, follow: true }), 1600);
   } finally {
     if (original === undefined) delete (globalThis as any).HTMLDetailsElement;

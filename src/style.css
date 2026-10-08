@@ -36,6 +36,9 @@
 .history-actions button { padding: 5px; border-radius: 4px; color: #839188; }
 .history-actions button:hover:not(:disabled) { background: #e1e7e3; }
 .task-list { min-height: 0; }
+.virtual-timeline { overflow-anchor: none; }
+.timeline-row { display: flow-root; }
+.conversation { overflow-anchor: none; }
 .management-modal { width: 430px; max-height: calc(100vh - 60px); overflow: auto; padding: 25px; border-radius: 12px; background: #fafbfc; box-shadow: 0 20px 80px #17282333; }
 .management-modal h3 { margin: 0 0 18px; font-size: 16px; overflow-wrap: anywhere; }
 .management-modal p { line-height: 1.8; color: #76847c; }
