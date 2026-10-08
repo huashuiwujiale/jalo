@@ -8,6 +8,40 @@ import { SessionStore } from '../electron/session';
 import { emptySession, emptyView, rememberView, restoreView, viewKey } from '../shared/session';
 import type { Snapshot, Task } from '../shared/types';
 
+test('model choices remain isolated by chat; legacy chats inherit their last model and new drafts follow the default', () => {
+  const p = randomUUID(), t = randomUUID(), u = randomUUID(), state = emptySession();
+  const snapshot = { projects: [{ id:p, name:'p', path:'/p' }], tasks: [{ id:t, projectId:p, model:'last-a' }, { id:u, projectId:p, model:'last-b' }] } as Pick<Snapshot,'projects'|'tasks'>;
+  rememberView(state, { ...emptyView(p,t), prompt:'旧草稿' });
+  assert.equal(restoreView(state,snapshot,{projectId:p,taskId:t}).model,'last-a');
+  assert.equal(restoreView(state,snapshot,{projectId:p,taskId:u}).model,'last-b');
+  assert.equal(restoreView(state,snapshot,{projectId:p,taskId:''}).model,undefined);
+  rememberView(state, { ...emptyView(p,t), model:'chosen-a' });
+  rememberView(state, { ...emptyView(p,u), model:'chosen-b' });
+  assert.equal(restoreView(state,snapshot,{projectId:p,taskId:t}).model,'chosen-a');
+  assert.equal(restoreView(state,snapshot,{projectId:p,taskId:u}).model,'chosen-b');
+  rememberView(state, { ...emptyView(p,t), model:'' });
+  assert.equal(restoreView(state,snapshot,{projectId:p,taskId:t}).model,'');
+});
+
+test('model selections survive reopening without discarding old version-1 drafts', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(),'jalo-model-session-'));
+  try {
+    const file=path.join(home,'ui-session.json'), p=randomUUID(), t=randomUUID(), u=randomUUID();
+    const old=emptySession(); rememberView(old,{...emptyView(p,t),prompt:'旧版未发送内容'});
+    await fs.writeFile(file,JSON.stringify(old));
+    const store=new SessionStore(file); assert.equal(store.read().warning,undefined);
+    assert.equal(store.read().state.views[viewKey(p,t)].prompt,'旧版未发送内容');
+    await store.save({...emptyView(p,t),model:'a',prompt:'草稿 A'});
+    await store.save({...emptyView(p,u),model:'b'});
+    await store.save({...emptyView(p),model:''});
+    const reopened=new SessionStore(file).read(); assert.equal(reopened.warning,undefined);
+    assert.equal(reopened.state.version,1);
+    assert.equal(reopened.state.views[viewKey(p,t)].model,'a');
+    assert.equal(reopened.state.views[viewKey(p,u)].model,'b');
+    assert.equal(reopened.state.views[viewKey(p,'')].model,'');
+  } finally { await fs.rm(home,{recursive:true,force:true}); }
+});
+
 test('task and project drafts restore independently including references, mode, run and scroll',()=>{
   const p=randomUUID(),q=randomUUID(),t=randomUUID(),u=randomUUID(),run=randomUUID();
   const state=emptySession(), a={...emptyView(p,t),prompt:'A 的未提交要求',mode:'review' as const,runId:run,references:[{projectId:p,path:'a.vue',startLine:2,endLine:5,version:'a'.repeat(64)}],scroll:{top:350,follow:false,anchor:'event-a',offset:-12,expanded:['event-a']}};

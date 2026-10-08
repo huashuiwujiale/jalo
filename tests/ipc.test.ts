@@ -181,11 +181,14 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await assert.rejects(invoke('task:submit',{projectId:project.id,taskId,prompt:'不应执行'}),/先恢复/);
     await invoke('task:archive',{taskId,archived:false});assert.equal((await snapshot()).tasks[0].archivedAt,undefined);
     const readsBeforeResume = bodyReads;
-    await invoke('task:submit',{projectId:project.id,taskId,prompt:'执行计划',mode:'execute',planRunId:run.id});
+    await invoke('task:submit',{projectId:project.id,taskId,prompt:'执行计划',model:'plan-model',mode:'execute',planRunId:run.id});
     assert.equal(bodyReads, readsBeforeResume + 1, 'resuming hydrates exactly the selected task');
     task=(await snapshot()).tasks[0];const second=task.runs.at(-1);assert.notEqual(second.id,run.id);assert.equal(second.planRunId,run.id);
     await new Promise(r=>setImmediate(r));
     const startMessage=workers.at(-1).sent.find((m:any)=>m.type==='start');
+    assert.equal(startMessage.input.model,'plan-model');assert.equal(startMessage.settings.model,'plan-model');
+    assert.equal(second.model,'plan-model');assert.equal(task.runs[0].model,'mock');
+    assert.equal((await invoke('app:snapshot')).settings.model,'mock');
     assert.ok(startMessage.input.messages.at(-1).content.includes(savedPlan));assert.ok(!startMessage.input.messages.at(-1).content.includes('临时思路'));
     assert.equal(startMessage.input.messages.length,1);assert.ok(!('task' in startMessage));
     assert.ok(!('runs' in startMessage.input));assert.ok(!('events' in startMessage.input));
@@ -216,7 +219,8 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await fs.writeFile(path.join(root,'a.txt'),'new');const preview2=await invoke('rollback:preview',{taskId,runId:second.id,path:'a.txt'});await invoke('rollback:confirm',preview2.token);
     assert.equal(await fs.readFile(path.join(root,'a.txt'),'utf8'),'old');task=(await snapshot()).tasks[0];assert.equal(task.runs.at(-1).changes[0].state,'reverted');assert.equal(task.changes.length,0);assert.ok(task.events.at(-1).text.includes('重新读取'));
     await assert.rejects(invoke('task:submit',{projectId:project.id,taskId,prompt:'review',mode:'review'}),/选择已有核验记录/);
-    await invoke('task:submit',{projectId:project.id,taskId,prompt:'review',mode:'review',reviewRunId:second.id});assert.equal((await snapshot()).tasks[0].runs.at(-1).reviewRunId,second.id);
+    await invoke('task:submit',{projectId:project.id,taskId,prompt:'review',model:'review-model',mode:'review',reviewRunId:second.id});assert.equal((await snapshot()).tasks[0].runs.at(-1).reviewRunId,second.id);
+    assert.equal((await snapshot()).tasks[0].runs.at(-1).model,'review-model');
     const lastRun=(await snapshot()).tasks[0].currentRunId;
     workers.at(-1).emit('message',{type:'done',runId:lastRun,status:'completed'});
     const beforeRemoval=(await snapshot()).tasks;
@@ -307,5 +311,38 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const gapDb=new DatabaseSync(path.join(userData,'local-code.sqlite'),{readOnly:true});
     const gapStored=JSON.parse(String(gapDb.prepare('SELECT data FROM tasks WHERE id=?').get(gapId)!.data));
     assert.equal(gapStored.messages.length,1);assert.equal(gapStored.messages[0].content,'message protocol gap');gapDb.close();
+
+    // Per-chat overrides work even without a default and keep their own queued configuration.
+    await invoke('settings:save',{...defaults,model:''});
+    await assert.rejects(invoke('task:submit',{projectId:project.id,prompt:'no model'}),/选择模型/);
+    await invoke('task:submit',{projectId:project.id,taskId:gapId,prompt:'continue with A',model:'model-a'});
+    const modelAWorker=workers.at(-1);
+    const modelBInput={projectId:project.id,prompt:'queued B',model:'model-b'};
+    const modelBId=await invoke('task:submit',modelBInput);
+    modelBInput.model='changed-after-submit';
+    const queued=(await snapshot()).tasks.find((t:any)=>t.id===modelBId);
+    assert.equal(queued.status,'queued');assert.equal(queued.model,'model-b');assert.equal(queued.runs[0].model,'model-b');
+    assert.equal((await invoke('app:snapshot')).settings.model,'');
+    await assert.rejects(invoke('settings:save',{...defaults,model:'other'}),/停止或完成/);
+    await assert.rejects(invoke('task:submit',{projectId:project.id,taskId:gapId,prompt:'cannot replace active',model:'model-c'}),/尚未结束/);
+    await new Promise(r=>setImmediate(r));
+    const modelAStart=modelAWorker.sent.find((m:any)=>m.type==='start');
+    assert.equal(modelAStart.input.model,'model-a');assert.equal(modelAStart.settings.model,'model-a');
+    assert.ok(modelAStart.input.messages.some((m:any)=>m.content==='message protocol gap'),'switching models preserves earlier conversation');
+    const modelATask=(await snapshot()).tasks.find((t:any)=>t.id===gapId);
+    assert.equal(modelATask.runs[0].model,'mock');assert.equal(modelATask.runs.at(-1).model,'model-a');
+    modelAWorker.emit('message',{type:'done',runId:modelATask.currentRunId,status:'completed'});
+    await new Promise(r=>setImmediate(r));
+    await new Promise(r=>setImmediate(r));
+    const modelBWorker=workers.at(-1), modelBStart=modelBWorker.sent.find((m:any)=>m.type==='start');
+    assert.equal(modelBStart.input.model,'model-b');assert.equal(modelBStart.settings.model,'model-b');
+    modelBWorker.emit('message',{type:'done',runId:queued.currentRunId,status:'completed'});
+    // Existing callers without an override continue to use the global default.
+    await invoke('settings:save',{...defaults,model:'mock'});
+    const legacyId=await invoke('task:submit',{projectId:project.id,taskId:gapId,prompt:'legacy caller'});
+    const legacyTask=(await snapshot()).tasks.find((t:any)=>t.id===legacyId);
+    assert.equal(legacyTask.model,'mock');assert.equal(legacyTask.runs.at(-1).model,'mock');
+    const legacyWorker=workers.at(-1);await new Promise(r=>setImmediate(r));
+    legacyWorker.emit('message',{type:'done',runId:legacyTask.currentRunId,status:'completed'});
   } finally { failWrites=false;Store.prototype.flush=originalFlush;Store.prototype.task=originalTask;Store.prototype.tasks=originalTasks;Store.prototype.detail=originalDetail;Module._load=original;app.emit('before-quit');await fs.rm(home,{recursive:true,force:true}); }
 });

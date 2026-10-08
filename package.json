@@ -1,6 +1,6 @@
 {
   "name": "jalo",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "private": true,
   "license": "MIT",
   "description": "Jalo — Your models. Your code. A local-first coding assistant powered by LM Studio.",

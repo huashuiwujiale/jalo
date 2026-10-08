@@ -1,0 +1,27 @@
+.composer-toolbar > .composer-actions { display:flex; align-items:center; gap:10px; min-width:0; }
+.composer-project { max-width:40%; flex-shrink:1; margin-bottom:0; }
+.composer-model { min-width:0; max-width:180px; border:1px solid #dce5df; border-radius:16px; padding:6px 10px; background:#edf3ef; color:#476653; font-size:11px; }
+.composer-model > span { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.composer-model.unavailable { color:#9c6556; border-color:#ebd9d4; background:#fcf1ee; }
+.composer-model-menu { position:fixed; z-index:60; display:flex; flex-direction:column; box-sizing:border-box; background:#fafbfc; color:#56616b; border:1px solid #dce5df; border-radius:12px; box-shadow:0 10px 35px #17282326; overflow:hidden; padding:8px; font-size:12px; }
+.composer-model-menu > header { display:flex; align-items:center; justify-content:space-between; padding:5px 8px 9px; flex-shrink:0; }
+.composer-model-menu > header strong { font-weight:550; color:#758079; }
+.composer-model-menu > header button { padding:5px; border-radius:5px; }
+.composer-model-options { overflow-y:auto; min-height:0; overscroll-behavior:contain; flex-shrink:1; }
+.composer-model-options > button { display:flex; width:100%; justify-content:space-between; text-align:left; padding:10px; border-radius:7px; gap:10px; }
+.composer-model-options > button.active { background:#e6eee8; }
+.composer-model-options > button > span { display:block; min-width:0; }
+.composer-model-options strong,.composer-model-options small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.composer-model-options strong { font-size:12px; font-weight:500; }
+.composer-model-options small { font-size:10px; color:#87978b; margin-top:5px; }
+.composer-model-options > button:first-child { border-bottom:1px solid #e4eae6; margin-bottom:4px; }
+.composer-model-options > button > svg { color:#476653; }
+.composer-model-feedback { flex-shrink:0; }
+.composer-model-feedback p { margin:7px 8px; font-size:11px; line-height:1.6; overflow-wrap:anywhere; }
+.composer-model-feedback [role=alert] { color:#9c6556; }
+.composer-model-feedback button { color:#476653; text-decoration:underline; padding:0 6px; }
+.composer-model-menu > footer { display:flex; flex-shrink:0; align-items:center; justify-content:space-between; border-top:1px solid #e4eae6; padding:8px 6px 0; gap:8px; }
+.composer-model-menu > footer button { font-size:11px; padding:4px; }
+.composer-model-menu > footer span { font-size:9px; color:#9aa69f; }
+.run-model { overflow-wrap:anywhere; }
+@media(max-width:1200px) { .composer-actions .shortcut { display:none; } .composer-model { max-width:150px; } }

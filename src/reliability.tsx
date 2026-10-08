@@ -41,6 +41,7 @@ export function RunResult({ run }: { run: Run | RunView }) {
   const uncertain = run.changes.filter(c => c.state === 'prepared' || c.state === 'uncertain');
   const checks = run.checks.reduce((r, c) => ({ ...r, [c.status]: r[c.status] + 1 }), { passed: 0, failed: 0, skipped: 0 });
   return <section className="run-result"><strong>{written.length ? '修改已写入，待验收' : restored.length ? '本轮修改已回退' : run.mode === 'execute' ? '本轮未产生已核验的文件修改' : `${modeLabels[run.mode]}轮次 · 只读`}</strong>
+    <p className="run-model">本轮模型：{run.model || '未记录'}</p>
     <p>当前保留修改 {written.length} 个文件 · 已回退 {restored.length} 个文件 · 检查通过 {checks.passed} 次 / 失败 {checks.failed} 次 / 未完整检查 {checks.skipped} 次</p>
     {!!uncertain.length && <p className="reference-error">{uncertain.length} 个检查点未完成写入核验，需检查磁盘内容，暂不能回退：{uncertain.map(c => c.path).join('、')}</p>}
     {written.map(c => <p key={c.id}>{c.path}：{c.check.status === 'passed' ? '语法通过' : '未完整检查'}<br/><small>{c.check.message}</small></p>)}

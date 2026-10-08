@@ -1,6 +1,6 @@
 # Jalo 本机 DMG 打包说明
 
-本文适用于在 Apple Silicon（M 系列）Mac 上打包并安装自己使用的 Jalo。当前版本为 `0.2.1`，使用本地临时签名（ad-hoc），未使用 Apple Developer ID 签名或公证。
+本文适用于在 Apple Silicon（M 系列）Mac 上打包并安装自己使用的 Jalo。当前版本为 `0.2.3`，使用本地临时签名（ad-hoc），未使用 Apple Developer ID 签名或公证。
 
 ## 1. 准备环境
 
@@ -26,7 +26,7 @@ export PATH="/Users/jiale/.nvm/versions/node/v22.19.0/bin:$PATH"
 
 ## 2. 版本与检查
 
-重新发布一个新版本前，同时更新 `package.json`、`package-lock.json` 的根版本和 `packages[""].version`。例如下次从 `0.2.1` 升到 `0.2.2`，可以执行：
+重新发布一个新版本前，同时更新 `package.json`、`package-lock.json` 的根版本和 `packages[""].version`。例如下次从 `0.2.3` 升到 `0.2.4`，可以执行：
 
 ```sh
 npm version patch --no-git-tag-version
@@ -50,12 +50,12 @@ npm run dist:mac
 
 当前脚本固定 `--mac dmg --arm64 --publish never`，不会上传 GitHub 或发布安装包。配置位于 `electron-builder.json`：应用标识为 `com.jiale.jalo`，使用临时签名，DMG 包含 Jalo 应用和指向 `/Applications` 的快捷方式。
 
-以 `0.2.1` 为例，产物位于：
+以 `0.2.3` 为例，产物位于：
 
 ```text
 release/
-├── Jalo-0.2.1-mac-arm64.dmg       # 用于安装
-├── Jalo-0.2.1-mac-arm64.dmg.blockmap
+├── Jalo-0.2.3-mac-arm64.dmg       # 用于安装
+├── Jalo-0.2.3-mac-arm64.dmg.blockmap
 └── mac-arm64/Jalo.app            # 打包生成的应用
 ```
 
@@ -66,7 +66,7 @@ release/
 以下命令检查镜像完整性及应用签名；下次升级版本后请替换 DMG 文件名：
 
 ```sh
-hdiutil verify release/Jalo-0.2.1-mac-arm64.dmg
+hdiutil verify release/Jalo-0.2.3-mac-arm64.dmg
 codesign --verify --deep --strict --verbose=2 release/mac-arm64/Jalo.app
 ```
 
@@ -76,8 +76,8 @@ codesign --verify --deep --strict --verbose=2 release/mac-arm64/Jalo.app
 
 1. 完成或停止正在运行、等待确认及排队中的任务。
 2. 在 Jalo 的“模型与设置 → 应用与诊断 → 打开数据目录”查看实际数据位置。退出 Jalo，将整个目录复制一份备份，包含数据库、`backups/`、`recovery/` 和 `ui-session.json`（如存在）。如果仍有数据库的 `-wal`、`-shm` 文件，也须一并复制，不能仅复制主数据库或删除 WAL。
-3. 双击 `release/Jalo-0.2.1-mac-arm64.dmg`，把 Jalo 拖入 Applications；已有安装时选择替换。
-4. 推出镜像，从“应用程序”打开 Jalo，在“应用与诊断”确认版本为 `0.2.1` 且为安装版。
+3. 双击 `release/Jalo-0.2.3-mac-arm64.dmg`，把 Jalo 拖入 Applications；已有安装时选择替换。
+4. 推出镜像，从“应用程序”打开 Jalo，在“应用与诊断”确认版本为 `0.2.3` 且为安装版。
 5. 核对项目、历史任务和草稿，再连接 LM Studio。
 
 替换应用不会主动删除数据目录。开发版与安装版共用实际数据目录，更新时应退出两者。当前没有自动更新；每次修改源码后，需要重新打包、替换应用才能在安装版中生效。

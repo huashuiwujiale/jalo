@@ -21,6 +21,7 @@ import { capturePosition, restorePosition, rememberExpanded } from './session-sc
 import { useEventHistory } from './event-history';
 import { HistoryControls, PlanActions } from './history-controls';
 import { ViewSaver } from './view-saver';
+import { ModelSelector, type ModelValidation } from './model-selector';
 declare global { interface Window { localCode: Api } }
 const statusText: Record<TaskSummary['status'], string> = { queued: '排队中', running: '执行中', waiting: '等待确认', completed: '本轮结束', failed: '执行失败', cancelled: '已停止', interrupted: '已中断' };
 const api = window.localCode;
@@ -31,6 +32,8 @@ function App() {
   const [taskId, setTaskId] = useState('');
   const [prompt, setPrompt] = useState('');
   const [mode, setMode] = useState<Mode>('execute');
+  const [model, setModel] = useState('');
+  const [modelValidation, setModelValidation] = useState<ModelValidation>();
   const [references, setReferences] = useState<FileReference[]>([]);
   const [picker, setPicker] = useState<{ path?: string }>();
   const [runId, setRunId] = useState('');
@@ -98,6 +101,9 @@ function App() {
   const isBusy = !!selected && busyStatuses.includes(selected.status);
   const evaluating = state.evaluations?.some(r => r.status === 'running');
   const composerLocked = isBusy || !!selected?.archivedAt || (!!selected && (!task || detail.loading || !!detail.error));
+  const modelService = JSON.stringify([state.settings.baseUrl, state.settings.token]);
+  const effectiveModel = model || state.settings.model;
+  const modelError = modelValidation?.service === modelService && modelValidation.model === effectiveModel ? modelValidation.error : '';
   const run = task?.runs?.find(r => r.id === runId) || task?.runs?.at(-1);
   const invalidReferences = references.some(r => r.projectId !== projectId);
   const projectBusy = state.tasks.some(t => t.projectId === projectId && busyStatuses.includes(t.status));
@@ -128,7 +134,7 @@ function App() {
     currentView.current = view; pendingPosition.current = view.scroll;
     expanded.current = new Set(view.scroll.expanded);
     expandedGroups.current.clear();
-    setProjectId(view.projectId); setTaskId(view.taskId); setPrompt(view.prompt); setMode(view.mode); setReferences(view.references);
+    setProjectId(view.projectId); setTaskId(view.taskId); setPrompt(view.prompt); setMode(view.mode); setModel(view.model ?? ''); setModelValidation(undefined); setReferences(view.references);
     setRunId(view.runId); setTab(view.tab); setPicker(undefined); setSelectedFile(''); setError('');
     setViewRevision(value => value + 1);
   }
@@ -159,9 +165,9 @@ function App() {
   }, [sessionReady, viewRevision, history.restoring, history.loading, history.events, task?.id]);
   useLayoutEffect(() => {
     if (!sessionReady) return;
-    currentView.current = { projectId,taskId,prompt,mode,references,runId,tab,scroll:pendingPosition.current || currentView.current.scroll };
+    currentView.current = { projectId,taskId,prompt,mode,model,references,runId,tab,scroll:pendingPosition.current || currentView.current.scroll };
     persistView(currentView.current);
-  }, [sessionReady,viewRevision,projectId,taskId,prompt,mode,references,runId,tab]);
+  }, [sessionReady,viewRevision,projectId,taskId,prompt,mode,model,references,runId,tab]);
   useEffect(() => {
     if (!sessionReady) return;
     const flush = () => {
@@ -196,12 +202,14 @@ function App() {
     if (evaluating) { setError('模型能力实测正在运行，请先停止或完成实测'); return; }
     if (invalidReferences && !planRunId) { setError('存在其他项目的失效引用，请移除或重新选择'); return; }
     if (!projectId) { setError('请先添加并选择一个项目文件夹'); return; }
+    if (!effectiveModel) { setError('请先在聊天框或模型设置中选择模型'); return; }
+    if (modelError) { setError(modelError); return; }
     setSending(true); setError('');
     const submitted = { ...currentView.current };
     try {
-      const id = await api.submit({ projectId, prompt: planRunId ? '按关联计划执行，先重新读取文件，再完成修改和核验。' : prompt, mode: planRunId ? 'execute' : mode, references: planRunId ? [] : references, ...(planRunId ? { planRunId } : {}), ...(mode === 'review' && !planRunId && run ? { reviewRunId: run.id } : {}), ...(taskId ? { taskId } : {}) });
+      const id = await api.submit({ projectId, model: effectiveModel, prompt: planRunId ? '按关联计划执行，先重新读取文件，再完成修改和核验。' : prompt, mode: planRunId ? 'execute' : mode, references: planRunId ? [] : references, ...(planRunId ? { planRunId } : {}), ...(mode === 'review' && !planRunId && run ? { reviewRunId: run.id } : {}), ...(taskId ? { taskId } : {}) });
       const next: SessionView = { ...submitted, taskId:id, runId:'', mode:planRunId ? 'execute' : mode, prompt:planRunId ? submitted.prompt : '', references:planRunId ? submitted.references : [], scroll:emptyView(projectId).scroll };
-      if(!submitted.taskId)persistView({...next,taskId:''});
+      if(!submitted.taskId)persistView({...next,taskId:'',model:''});
       saver.current!.flush(); openView(next,false);
     } catch (e) { fail(e); }
     finally { setSending(false); }
@@ -219,7 +227,7 @@ function App() {
       <div className="sidebar-bottom"><div className="local-badge"><span className="green-dot"/>本地模型 · 本地记录</div><button onClick={() => setSettingsOpen(true)}><Settings2 size={16}/>模型与设置<ChevronRight size={15}/></button></div>
     </aside>
     <main className="workspace">
-      <header className="topbar"><div className="breadcrumb"><Folder size={15}/><span>{project?.name || '选择工作空间'}</span><span className="slash">/</span><strong>{task ? '任务详情' : '新建任务'}</strong></div><button className="model-pill" onClick={() => setSettingsOpen(true)}><span className={state.settings.model ? 'green-dot' : 'gray-dot'}/><span>{state.settings.model || '连接本地模型'}</span><ChevronDown size={13}/></button></header>
+      <header className="topbar"><div className="breadcrumb"><Folder size={15}/><span>{project?.name || '选择工作空间'}</span><span className="slash">/</span><strong>{task ? '任务详情' : '新建任务'}</strong></div><button className="model-pill" title="全局默认模型 · 打开模型与设置" onClick={() => setSettingsOpen(true)}><span className={state.settings.model ? 'green-dot' : 'gray-dot'}/><span>{state.settings.model || '连接本地模型'}</span><ChevronDown size={13}/></button></header>
       <div className="conversation-pane">
       <div className="conversation" key={viewKey(projectId,taskId)} ref={conversation} onScroll={handleConversationScroll} onToggleCapture={event => { if (event.target instanceof HTMLDetailsElement) rememberExpanded(event.target, expanded.current, expandedGroups.current); schedulePosition(); }}
         onWheel={event => { if (event.deltaY < 0) pauseFollowing(); }}
@@ -259,7 +267,7 @@ function App() {
         <div className={`composer ${composerLocked ? 'busy' : ''}`}><MentionInput key={`${projectId}:${taskId}`} api={api} project={project} placeholder={task?.archivedAt ? '恢复任务后可继续对话' : isBusy ? '任务正在执行，可停止后继续补充要求…' : '描述任务，输入 @ 引用文件…'} value={prompt} disabled={composerLocked || sending} canAdd={references.length < 8} onChange={setPrompt} onChoose={ref=>setReferences(old=>[...old.filter(r=>!(r.projectId===ref.projectId && r.path===ref.path)),ref].slice(0,8))} onPending={setReferencePending} submit={()=>void submit()}/><div className="composer-toolbar"><label className="composer-project" title={project?.path || '选择任务所在项目'}><Folder size={13}/><select aria-label="切换任务项目" value={projectId} disabled={sending || !state.projects.length} onChange={e => chooseProject(e.target.value)}>
           {!projectId && <option value="" disabled>未选择项目</option>}
           {state.projects.map(p => <option key={p.id} value={p.id}>{state.projects.filter(other => other.name === p.name).length > 1 ? `${p.name} — ${p.path}` : p.name}</option>)}
-        </select><ChevronDown size={12}/></label><div>{isBusy ? <><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[selected!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(selected!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || referencePending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
+        </select><ChevronDown size={12}/></label><div className="composer-actions"><ModelSelector key={`${projectId}:${taskId}`} api={api} value={model} defaultModel={state.settings.model} service={modelService} disabled={sending || composerLocked || !!evaluating} onChange={setModel} onValidation={setModelValidation} settings={() => setSettingsOpen(true)}/>{isBusy ? <><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[selected!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(selected!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || referencePending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
         <div className="composer-caption"><ShieldCheck size={12}/>推理由你配置的 LM Studio 提供<span>Jalo / 开发版</span></div>
       </div>
     </main>

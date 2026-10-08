@@ -26,8 +26,8 @@ export interface CapturedReference extends FileReference { content: string }
 export interface FilePage { path: string; version: string; totalLines: number; startLine: number; endLine: number; content: string; hasMore: boolean }
 export interface CheckResult { path: string; status: 'passed' | 'failed' | 'skipped'; parser: string; message: string; at: number; version: string }
 export interface RunChange extends Change { id: string; runId: string; beforeVersion: string | null; afterVersion: string; check: CheckResult; state: 'prepared' | 'written' | 'reverted' | 'uncertain'; revertedAt?: number }
-export interface Run { id: string; taskId: string; mode: Mode; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planText?: string; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
-export interface SubmitInput { projectId: string; prompt: string; taskId?: string; mode?: Mode; references?: FileReference[]; planRunId?: string; reviewRunId?: string }
+export interface Run { id: string; taskId: string; mode: Mode; model?: string; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planText?: string; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
+export interface SubmitInput { projectId: string; prompt: string; taskId?: string; model?: string; mode?: Mode; references?: FileReference[]; planRunId?: string; reviewRunId?: string }
 export interface RollbackPreview { token: string; patch: string; path: string; createsRecoveryCopy: boolean }
 export interface Change { path: string; before: string | null; after: string; patch: string }
 export interface Approval { id: string; command: string; cwd: string; timeout: number }

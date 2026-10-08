@@ -396,7 +396,8 @@ function registerApi() {
     projectLocks.add(input.projectId);
     try {
     if (modelOperation) throw new Error('模型正在加载或卸载，请稍后创建任务');
-    const config = settings(); if (!config.model) throw new Error('请先在模型设置中选择默认模型');
+    const config = { ...settings(), ...(input.model !== undefined ? { model: input.model } : {}) };
+    if (!config.model) throw new Error('请先在聊天框或模型设置中选择模型');
     const project = store.projects().find(p => p.id === input.projectId); if (!project) throw new Error('请先选择项目');
     await fs.access(project.path);
     let task = input.taskId ? readTask(input.taskId) : undefined;
@@ -417,7 +418,7 @@ function registerApi() {
       task = { id: randomUUID(), projectId: project.id, title: input.prompt.slice(0, 50), model: config.model, status: 'queued', createdAt: Date.now(), messages: [], events: [], changes: [] };
     }
     if (['interrupted', 'cancelled', 'failed'].includes(task.status)) task.messages.push({ role: 'assistant', content: '上一轮未正常完成，可能已有部分文件修改或命令执行。请先检查当前状态，不要自动重放历史工具调用。' });
-    const run: Run = { id: randomUUID(), taskId: task.id, mode: input.mode, input: input.prompt, createdAt: Date.now(), status: 'queued', references, changes: [], checks: [], planRunId: input.planRunId, reviewRunId: input.reviewRunId };
+    const run: Run = { id: randomUUID(), taskId: task.id, mode: input.mode, model: config.model, input: input.prompt, createdAt: Date.now(), status: 'queued', references, changes: [], checks: [], planRunId: input.planRunId, reviewRunId: input.reviewRunId };
     task.runs ??= []; task.runs.push(run); task.currentRunId = run.id; task.mode = input.mode;
     progress(task, 'queued');
     let context = referenceContext(references);

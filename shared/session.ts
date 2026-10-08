@@ -4,7 +4,7 @@ import type { Project, Task, TaskSummary } from './types';
 const id = z.union([z.string().uuid(), z.literal('')]);
 export const selectionSchema = z.object({ projectId: id, taskId: id }).strict();
 export const scrollSchema = z.object({ top: z.number().finite().min(0).max(1e9), follow: z.boolean(), anchor: z.string().max(200).optional(), offset: z.number().finite().min(-1e7).max(1e7).optional(), expanded: z.array(z.string().max(200)).max(600) }).strict();
-export const viewSchema = selectionSchema.extend({ prompt: z.string().max(100000), mode: z.enum(['execute','plan','review']), references: z.array(referenceSchema).max(8), runId: id, tab: z.enum(['changes','terminal']), scroll: scrollSchema }).strict();
+export const viewSchema = selectionSchema.extend({ prompt: z.string().max(100000), mode: z.enum(['execute','plan','review']), model: z.string().max(300).optional(), references: z.array(referenceSchema).max(8), runId: id, tab: z.enum(['changes','terminal']), scroll: scrollSchema }).strict();
 export type SessionView = z.infer<typeof viewSchema>;
 export interface SessionState { version: 1; selected: z.infer<typeof selectionSchema>; projectTasks: Record<string,string>; views: Record<string,SessionView> }
 export const emptySession = (): SessionState => ({ version:1, selected:{projectId:'',taskId:''}, projectTasks:{}, views:{} });
@@ -20,6 +20,8 @@ export function restoreView(state: SessionState, snapshot: { projects: Project[]
   const preferred = projectId === selection.projectId ? selection.taskId : state.projectTasks[projectId] || '';
   const task = snapshot.tasks.find(t=>t.id===preferred && t.projectId===projectId);
   const view = structuredClone(state.views[viewKey(projectId,task?.id || '')] || emptyView(projectId,task?.id));
+  // Missing means a legacy draft; an explicit empty string follows the default model.
+  if (view.model === undefined && task?.model) view.model = task.model;
   const runIds = task && ('runIds' in task ? task.runIds : task.runs?.map(run => run.id));
   if(view.runId && !runIds?.includes(view.runId)) view.runId = '';
   return view;

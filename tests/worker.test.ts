@@ -5,11 +5,53 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
-import { defaults, type Message, type Task } from '../shared/types';
+import { defaults, type Message, type Task, type Settings } from '../shared/types';
 import { workerInput, MessagePatchReceiver, type WorkerEvent } from '../shared/worker-wire';
 import { version } from '../engine/syntax';
 const require = createRequire(import.meta.url);
 const call = (id: string, name: string, args: unknown) => ({ id, type: 'function' as const, function: { name, arguments: JSON.stringify(args) } });
+
+test('worker resolves the chosen model at send time, loads only when needed and never silently falls back', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'jalo-model-worker-'));
+  const Module = require('node:module'), originalLoad = Module._load, originalPort = (process as any).parentPort;
+  try {
+    for (const scenario of ['loaded', 'unloaded', 'removed', 'incompatible'] as const) {
+      const port = new EventEmitter() as any, loads: string[] = [], generated: string[] = [];
+      let unloads = 0, result: any;
+      class Provider {
+        constructor(private settings: Settings) {}
+        async list() { return scenario === 'removed' ? [] : [{ key:'chosen', toolUse:scenario !== 'incompatible', maxContext:16384, instances:scenario === 'loaded' ? [{id:'chosen-instance',contextLength:16384}] : [] }]; }
+        async load(key: string) { loads.push(key); return 'chosen-instance'; }
+        async unload() { unloads++; }
+        async generate(_messages: Message[], _tools: unknown, _signal: AbortSignal, _delta: unknown, forceTool?: string) {
+          generated.push(this.settings.model);
+          return forceTool ? { message:{role:'assistant',content:null,tool_calls:[call('probe','capability_check',{ok:true})]}, finishReason:'tool_calls' }
+            : { message:{role:'assistant',content:'保留历史，按新模型给出计划。'}, finishReason:'stop' };
+        }
+      }
+      let resolveDone: () => void;
+      const done = new Promise<void>(resolve => { resolveDone = resolve; });
+      port.postMessage = (event: any) => { if(event.type === 'done') { result=event; resolveDone(); } };
+      Module._load = function(id: string, ...args: any[]) { return id === './provider' ? { LMStudioProvider:Provider } : originalLoad.call(this,id,...args); };
+      (process as any).parentPort=port;
+      delete require.cache[require.resolve('../engine/worker.ts')]; require('../engine/worker.ts');
+      const timer=setTimeout(()=>resolveDone(),5000);
+      try {
+        port.emit('message',{data:{type:'start',root:home,backupDir:path.join(home,'backups'),settings:{...defaults,model:'chosen'},input:{projectId:'p',model:'chosen',messages:[{role:'user',content:'继续上一轮对话'}],changes:[],run:{id:'r',mode:'plan',references:[]}}}});
+        await done; assert.ok(result,`worker timed out: ${scenario}`);
+        assert.equal(unloads,0);
+        assert.deepEqual(loads,scenario === 'unloaded' ? ['chosen'] : []);
+        if(scenario === 'removed' || scenario === 'incompatible') {
+          assert.equal(result.status,'failed'); assert.deepEqual(generated,[]);
+          assert.match(result.error,scenario === 'removed' ? /不存在/ : /工具调用/);
+        } else { assert.equal(result.status,'completed'); assert.deepEqual(generated,['chosen-instance','chosen-instance']); }
+      } finally { clearTimeout(timer); port.removeAllListeners(); }
+    }
+  } finally {
+    Module._load=originalLoad; (process as any).parentPort=originalPort; delete require.cache[require.resolve('../engine/worker.ts')];
+    await fs.rm(home,{recursive:true,force:true});
+  }
+});
 
 test('worker sends incremental complete groups, waits for checkpoints and retains individual command approval', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'jalo-worker-test-'));
