@@ -37,7 +37,17 @@ function appInfo(): AppInfo {
 }
 const developmentUrl = app.isPackaged ? undefined : process.env.LOCAL_CODE_DEV_URL;
 let win: BrowserWindow | undefined, store: Store;
-let tasks: Task[] = [];
+let tasks: TaskSummary[] = [];
+// Full objects live only while executing, queued, saving or held by an operation.
+const residentTasks = new Map<string, Task>();
+function readTask(id: string) {
+  let task = residentTasks.get(id);
+  if (!task) { task = store.task(id); residentTasks.set(id, task); }
+  return task;
+}
+function releaseTasks() {
+  for (const [id, task] of residentTasks) if (!busyStatuses.includes(task.status) && !projectLocks.has(task.projectId) && !store.hasPending(id)) residentTasks.delete(id);
+}
 let active: { task: Task; worker: UtilityProcess; timer?: ReturnType<typeof setTimeout>; pids: Set<number> } | undefined;
 let modelOperation = false, quitting = false, storageFailed = false;
 let session: SessionStore;
@@ -59,11 +69,17 @@ function settings(): Settings {
   return saved;
 }
 const taskRevisions = new Map<string, number>();
-const summaries = new Map<string, TaskSummary>();
-function summary(task: Task) {
-  const revision = taskRevisions.get(task.id) || 0, cached = summaries.get(task.id);
+const liveSummaries = new WeakMap<Task, TaskSummary>();
+function summary(saved: TaskSummary) {
+  const task = residentTasks.get(saved.id), revision = taskRevisions.get(saved.id) || 0;
+  if (!task || saved.revision === revision) return saved;
+  const cached = liveSummaries.get(task);
   if (cached?.revision === revision) return cached;
-  const value = taskSummary(task, revision); summaries.set(task.id, value); return value;
+  const value = taskSummary(task, revision); liveSummaries.set(task, value); return value;
+}
+function replaceSummary(value: TaskSummary) {
+  const index = tasks.findIndex(task => task.id === value.id);
+  if (index >= 0) tasks[index] = value; else tasks.unshift(value);
 }
 const updates = new UpdateBatch((ids, global, sequence) => ({ sequence, tasks: tasks.filter(task => ids.includes(task.id)).map(summary), activeId: active?.task.id,
   ...(global ? { projects: store.projects(), settings: settings(), evaluations: evaluation?.reports() || [] } : {}) }),
@@ -71,8 +87,15 @@ const updates = new UpdateBatch((ids, global, sequence) => ({ sequence, tasks: t
 const replies = new ReplyStream(frame => { if (win && !win.isDestroyed()) win.webContents.send('task:delta', frame); });
 function snapshot(): Snapshot { return { sequence: updates.sequence, projects: store.projects(), tasks: tasks.map(summary), settings: settings(), activeId: active?.task.id, evaluations: evaluation?.reports() || [] }; }
 function broadcast(task?: Task, immediate = true) {
-  if (task) taskRevisions.set(task.id, (taskRevisions.get(task.id) || 0) + 1);
+  if (task) {
+    const revision = (taskRevisions.get(task.id) || 0) + 1; taskRevisions.set(task.id, revision);
+    if (immediate) replaceSummary(taskSummary(task, revision));
+  }
   updates.queue(task?.id, immediate);
+}
+function broadcastMetadata(id: string) {
+  const revision = (taskRevisions.get(id) || 0) + 1; taskRevisions.set(id, revision);
+  replaceSummary({ ...store.summary(id), revision }); updates.queue(id, true);
 }
 function storageFailure(task: Task, error: unknown) {
   storageFailed = true;
@@ -86,6 +109,7 @@ function storageFailure(task: Task, error: unknown) {
   replies.end(task.id); syncRun(task); broadcast(task);
 }
 function persist(task: Task, durability: 'immediate' | 'deferred' = 'immediate', runId = task.currentRunId, notify = true) {
+  residentTasks.set(task.id, task);
   syncRun(task);
   if (durability === 'deferred') store.deferTask(task, runId, error => storageFailure(task, error));
   else {
@@ -93,6 +117,7 @@ function persist(task: Task, durability: 'immediate' | 'deferred' = 'immediate',
     catch (error) { storageFailure(task, error); throw error; }
   }
   if (notify) broadcast(task, durability === 'immediate');
+  releaseTasks();
 }
 function idleRequired() { if (evaluation?.busy) throw new Error('模型能力实测正在运行，请先停止或完成实测'); if (modelOperation || tasks.some(t => busyStatuses.includes(t.status))) throw new Error('请先停止或完成运行中和排队中的任务，再调整模型或设置'); }
 function killProcesses(pids: Set<number>) { for (const pid of pids) { try { process.kill(-pid, 'SIGKILL'); } catch {} } }
@@ -109,8 +134,9 @@ function finish(task: Task, status: Task['status'], error?: string) {
 }
 function pump() {
   if (active || modelOperation || evaluation?.busy || quitting || storageFailed) return;
-  const task = tasks.filter(t => t.status === 'queued').sort((a, b) => (a.queuedAt || a.createdAt) - (b.queuedAt || b.createdAt))[0];
-  if (!task) return;
+  const queued = tasks.filter(t => t.status === 'queued').sort((a, b) => (a.queuedAt || a.createdAt) - (b.queuedAt || b.createdAt))[0];
+  if (!queued) return;
+  const task = readTask(queued.id);
   const project = store.projects().find(p => p.id === task.projectId);
   if (!project) { task.status = 'failed'; task.error = '项目不存在'; try { persist(task); } catch { return; } setImmediate(pump); return; }
   try {
@@ -225,7 +251,8 @@ function registerApi() {
     try {
       const selection = await dialog.showSaveDialog(win!, { title: '导出诊断日志', defaultPath: `Jalo-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, filters: [{ name: '诊断日志 JSON', extensions: ['json'] }] });
       if (selection.canceled || !selection.filePath) return null;
-      await saveDiagnosticReport(selection.filePath, diagnosticReport(appInfo(), tasks, diagnostics), app.getPath('userData'));
+      const recent = tasks.slice(0, 50).map(task => residentTasks.get(task.id) || store.view(task.id));
+      await saveDiagnosticReport(selection.filePath, diagnosticReport(appInfo(), recent, diagnostics, tasks.length), app.getPath('userData'));
       diagnostics.record({ event: 'diagnostics_exported' });
       return selection.filePath;
     } finally { exportingDiagnostics = false; }
@@ -249,30 +276,37 @@ function registerApi() {
   register('task:rename', (raw: unknown) => {
     const input = z.object({ taskId: uuid, title: z.string().trim().min(1).max(100) }).strict().parse(raw);
     const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
-    task.title = input.title; store.putTask(task); broadcast(task);
+    const resident = residentTasks.get(task.id);
+    if (resident) { resident.title = input.title; persist(resident); }
+    else { store.updateMetadata(task.id, { title: input.title }); broadcastMetadata(task.id); }
   });
   register('task:archive', (raw: unknown) => {
     const input = z.object({ taskId: uuid, archived: z.boolean() }).strict().parse(raw);
     const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
     if (projectLocks.has(task.projectId) || busyStatuses.includes(task.status)) throw new Error('请先停止或完成任务，再归档或恢复');
-    if (input.archived) task.archivedAt ??= Date.now(); else delete task.archivedAt;
-    store.putTask(task); broadcast(task);
+    const archivedAt = input.archived ? task.archivedAt ?? Date.now() : undefined;
+    const resident = residentTasks.get(task.id);
+    if (resident) { resident.archivedAt = archivedAt; persist(resident); }
+    else { store.updateMetadata(task.id, { archivedAt }); broadcastMetadata(task.id); }
   });
   register('task:detail', (raw: unknown) => {
-    const id = uuid.parse(raw), task = tasks.find(task => task.id === id); if (!task) throw new Error('任务不存在');
-    return taskDetail(task, taskRevisions.get(id) || 0, replies.snapshot(id));
+    const id = uuid.parse(raw), task = residentTasks.get(id), revision = taskRevisions.get(id) || 0;
+    return task ? taskDetail(task, revision, replies.snapshot(id)) : { ...store.detail(id, revision), stream: replies.snapshot(id) };
   });
   register('tasks:search', (raw: unknown) => {
     const input = z.object({ projectId: uuid, archived: z.boolean(), query: z.string().max(100000) }).strict().parse(raw);
-    return searchTaskIds(tasks, input.projectId, input.archived, input.query);
+    const resident = [...residentTasks.values()], ids = new Set(store.search(input.projectId, input.archived, input.query));
+    for (const task of resident) ids.delete(task.id);
+    for (const id of searchTaskIds(resident, input.projectId, input.archived, input.query)) ids.add(id);
+    return tasks.filter(task => ids.has(task.id)).map(task => task.id);
   });
   register('task:events', (raw: unknown) => {
     const cursor = z.string().min(1).max(200).optional();
     const input = z.object({ taskId: uuid, before: cursor, after: cursor, around: cursor }).strict()
       .refine(value => [value.before, value.after, value.around].filter(id => id !== undefined).length <= 1, '历史记录游标只能指定一个方向').parse(raw);
-    const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
+    const task = residentTasks.get(input.taskId);
     const direction = input.around !== undefined ? { around: input.around } : input.after !== undefined ? { after: input.after } : { before: input.before };
-    return pageTaskEvents(task, direction);
+    return task ? pageTaskEvents(task, direction) : store.events(input.taskId, direction);
   });
   register('settings:save', (raw: unknown) => {
     idleRequired(); const value = settingsSchema.parse(raw);
@@ -299,7 +333,14 @@ function registerApi() {
   register('files:list', async (raw: unknown) => { const v = z.object({ projectId: uuid, path: z.string().min(1).max(1024) }).strict().parse(raw); return listDirectory(projectById(v.projectId).path, v.path); });
   register('files:preview', async (raw: unknown) => { const v = z.object({ projectId: uuid, path: z.string().min(1).max(1024), startLine: z.number().int().min(1).optional() }).strict().parse(raw); return previewFile(projectById(v.projectId).path, v.path, v.startLine); });
   register('files:reference', async (raw: unknown) => { const v = z.object({ projectId: uuid, path: z.string().min(1).max(1024) }).strict().parse(raw); return referenceFile(projectById(v.projectId),v.path); });
-  const locateRun = (taskId: string, runId: string) => { const task = tasks.find(t => t.id === taskId); const run = task?.runs?.find(r => r.id === runId); if (!task || !run) throw new Error('历史数据缺少轮次核验，无法进行此操作'); return { task, run }; };
+  const locateRun = (taskId: string, runId: string) => {
+    const task = tasks.find(t => t.id === taskId);
+    if (!task || !task.runIds.includes(runId)) throw new Error('历史数据缺少轮次核验，无法进行此操作');
+    const resident = residentTasks.get(taskId);
+    const run = resident ? resident.runs?.find(run => run.id === runId) : store.run(taskId, runId);
+    if (!run) throw new Error('历史数据缺少轮次核验，无法进行此操作');
+    return { task, run };
+  };
   register('runs:plan', (raw: unknown) => {
     const v = z.object({ taskId: uuid, runId: uuid }).strict().parse(raw), { run } = locateRun(v.taskId, v.runId);
     if (run.mode !== 'plan' || run.status !== 'completed' || !run.planText?.trim()) throw new Error('该计划缺少完整保存的正文，请重新生成计划后执行');
@@ -308,7 +349,7 @@ function registerApi() {
   register('changes:patch', (raw: unknown) => {
     const v = z.object({ taskId: uuid, runId: uuid.optional(), path: z.string().min(1).max(1024) }).strict().parse(raw);
     const task = tasks.find(task => task.id === v.taskId); if (!task) throw new Error('任务不存在');
-    const changes = v.runId ? locateRun(v.taskId, v.runId).run.changes : task.changes;
+    const changes = v.runId ? locateRun(v.taskId, v.runId).run.changes : residentTasks.get(task.id)?.changes || store.changes(task.id);
     const change = changes.find(change => change.path === v.path); if (!change) throw new Error('修改记录不存在');
     return { patch: change.patch, version: changeView(change).patchVersion };
   });
@@ -327,8 +368,9 @@ function registerApi() {
   register('rollback:confirm', async (raw: unknown) => {
     const token = uuid.parse(raw), pending = rollbackTokens.get(token); rollbackTokens.delete(token);
     if (!pending || pending.expires < Date.now()) throw new Error('回退预览已过期，请重新预览');
-    const { task, run } = locateRun(pending.taskId, pending.runId);
-    if (projectLocks.has(task.projectId) || tasks.some(t => t.projectId === task.projectId && busyStatuses.includes(t.status))) throw new Error('项目有运行中或排队任务，暂不能回退');
+    const located = locateRun(pending.taskId, pending.runId);
+    if (projectLocks.has(located.task.projectId) || tasks.some(t => t.projectId === located.task.projectId && busyStatuses.includes(t.status))) throw new Error('项目有运行中或排队任务，暂不能回退');
+    const task = readTask(pending.taskId), run = task.runs!.find(run => run.id === pending.runId)!;
     projectLocks.add(task.projectId);
     try {
       const change = run.changes.find(c => c.path === pending.path); if (!change || change.afterVersion !== pending.afterVersion) throw new Error('修改记录已变化，请重新预览');
@@ -345,7 +387,7 @@ function registerApi() {
       task.messages.push({ role: 'user', content: text });
       if (task.lastRun && task.currentRunId === run.id) task.lastRun.changedFiles = run.changes.filter(c => c.state === 'written' && c.before !== c.after).map(c => c.path);
       persist(task, 'immediate', run.id);
-    } finally { projectLocks.delete(task.projectId); }
+    } finally { projectLocks.delete(task.projectId); releaseTasks(); }
   });
   register('task:submit', async (raw: unknown) => {
     if (evaluation.busy) throw new Error('模型能力实测正在运行，请结束实测后提交任务');
@@ -357,7 +399,7 @@ function registerApi() {
     const config = settings(); if (!config.model) throw new Error('请先在模型设置中选择默认模型');
     const project = store.projects().find(p => p.id === input.projectId); if (!project) throw new Error('请先选择项目');
     await fs.access(project.path);
-    let task = input.taskId ? tasks.find(t => t.id === input.taskId) : undefined;
+    let task = input.taskId ? readTask(input.taskId) : undefined;
     if (input.taskId && !task) throw new Error('任务不存在');
     if (task?.archivedAt) throw new Error('请先恢复已归档任务，再继续对话');
     if (task && (busyStatuses.includes(task.status) || task.projectId !== input.projectId)) throw new Error('该任务尚未结束或不属于当前项目');
@@ -373,7 +415,6 @@ function registerApi() {
     for (const file of plannedFiles) await referenceFile(project, file);
     if (!task) {
       task = { id: randomUUID(), projectId: project.id, title: input.prompt.slice(0, 50), model: config.model, status: 'queued', createdAt: Date.now(), messages: [], events: [], changes: [] };
-      tasks.unshift(task);
     }
     if (['interrupted', 'cancelled', 'failed'].includes(task.status)) task.messages.push({ role: 'assistant', content: '上一轮未正常完成，可能已有部分文件修改或命令执行。请先检查当前状态，不要自动重放历史工具调用。' });
     const run: Run = { id: randomUUID(), taskId: task.id, mode: input.mode, input: input.prompt, createdAt: Date.now(), status: 'queued', references, changes: [], checks: [], planRunId: input.planRunId, reviewRunId: input.reviewRunId };
@@ -386,16 +427,17 @@ function registerApi() {
     task.events.push({ id: randomUUID(), at: Date.now(), kind: 'message', role: 'user', text: input.prompt, runId: run.id });
     task.model = config.model; task.status = 'queued'; task.queuedAt = Date.now(); task.error = undefined; task.approval = undefined; task.lastRun = undefined;
     configs.set(task.id, config); persist(task); diagnostics.record({ event: 'task_queued', taskId: task.id, runId: run.id }); pump(); return task.id;
-    } finally { projectLocks.delete(input.projectId); }
+    } finally { projectLocks.delete(input.projectId); releaseTasks(); }
   });
   register('task:stop', (id: unknown) => {
-    const task = tasks.find(t => t.id === uuid.parse(id)); if (!task) throw new Error('任务不存在');
+    const task = readTask(uuid.parse(id));
     if (active?.task.id === task.id) {
       if (currentRun(task)?.progress?.phase !== 'stopping') progress(task, 'stopping');
       task.approval = undefined; task.status = 'running'; persist(task);
       active.worker.postMessage({ type: 'cancel' });
       if (!active.timer) active.timer = setTimeout(() => finish(task, 'cancelled'), 4000);
     } else if (task.status === 'queued') { task.status = 'cancelled'; configs.delete(task.id); persist(task); }
+    releaseTasks();
   });
   register('task:approve', (raw: unknown) => {
     const value = z.object({ taskId: uuid, approvalId: uuid, allow: z.boolean() }).strict().parse(raw);
@@ -430,7 +472,7 @@ else {
     store = await Store.open(path.join(app.getPath('userData'), 'local-code.sqlite'));
     session = new SessionStore(path.join(app.getPath('userData'), 'ui-session.json'));
     evaluation = new EvaluationController(store, () => utilityProcess.fork(path.join(__dirname, 'worker.cjs'), [], { serviceName: 'Jalo Model Evaluation', stdio: 'pipe' }), broadcast, app.getVersion());
-    tasks = store.tasks(); registerApi();
+    tasks = store.summaries(); registerApi();
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Jalo', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }, { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }] }]));
     await createWindow();
     diagnostics.record({ event: 'app_ready' });
@@ -446,7 +488,7 @@ else {
     evaluation?.shutdown();
     if (active) { clearTimeout(active.timer); killProcesses(active.pids); active.worker.kill(); }
     if (store) {
-      try { for (const task of tasks.filter(t => busyStatuses.includes(t.status))) { task.status = 'interrupted'; task.approval = undefined; task.error = '应用已退出，请检查修改后手动继续。'; syncRun(task); store.deferTask(task, task.currentRunId); } store.close(); }
+      try { for (const summary of tasks.filter(t => busyStatuses.includes(t.status))) { const task = readTask(summary.id); task.status = 'interrupted'; task.approval = undefined; task.error = '应用已退出，请检查修改后手动继续。'; syncRun(task); store.deferTask(task, task.currentRunId); } store.close(); }
       catch (error) { diagnostics.record({ event: 'ipc_error', errorCategory: errorCategory(error) }); dialog.showErrorBox('任务记录保存失败', '退出前未能保存最后的任务记录，请检查磁盘空间和数据目录权限。'); }
     }
   });

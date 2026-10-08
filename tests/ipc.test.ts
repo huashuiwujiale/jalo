@@ -21,6 +21,11 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
   let saveSelection: any = { canceled: true }, saveCalls = 0, openError = '', about: any;
   const opened: string[] = [], externalLinks: string[] = [], copied: string[] = [], deliveries: { channel: string; value: any }[] = [];
   const originalFlush = Store.prototype.flush;
+  const originalTask = Store.prototype.task, originalTasks = Store.prototype.tasks, originalDetail = Store.prototype.detail;
+  let bodyReads = 0, detailReads = 0;
+  Store.prototype.tasks = () => { throw new Error('main must not load all task history'); };
+  Store.prototype.task = function (id) { bodyReads++; return originalTask.call(this, id); };
+  Store.prototype.detail = function (id, revision) { detailReads++; return originalDetail.call(this, id, revision); };
   let flushes = 0, failWrites = false;
   Store.prototype.flush = function () {
     flushes++;
@@ -149,7 +154,9 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const update=deliveries.filter(delivery=>delivery.channel==='app:update').at(-1)!.value;
     assert.deepEqual(update.tasks.map((task:any)=>task.id),[taskId]);assert.ok(!('settings' in update));
     assert.ok(!JSON.stringify(update).includes(savedPlan));
+    const readsBeforeHistory = bodyReads, detailsBeforeHistory = detailReads;
     const historyTask=(await snapshot()).tasks[0];assert.equal(historyTask.events.length,100);assert.ok(historyTask.eventCount>600);assert.equal(historyTask.runs[0].hasPlan,true);assert.ok(!('planText' in historyTask.runs[0]));assert.equal(await invoke('runs:plan',{taskId,runId:run.id}),savedPlan);
+    assert.ok(detailReads > detailsBeforeHistory, 'completed tasks must be released and details read from the catalog');
     await assert.rejects(invoke('task:events',{taskId:randomUUID()}),/任务不存在/);
     await assert.rejects(invoke('task:events',{taskId,before:'wrong-cursor'}),/游标不存在/);
     for(const direction of ['after','around'])await assert.rejects(invoke('task:events',{taskId,[direction]:'wrong-cursor'}),/游标不存在/);
@@ -167,9 +174,14 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.ok((await snapshot()).tasks[0].runs[0].progress.endedAt);
     await invoke('task:archive',{taskId,archived:true});
     const archived=(await snapshot()).tasks[0];assert.ok(archived.archivedAt);assert.equal(archived.runs[0].status,'completed');
+    await invoke('task:rename',{taskId,title:'新的任务名称'});
+    assert.deepEqual(await invoke('tasks:search',{projectId:project.id,archived:true,query:'先计划'}),[taskId]);
+    assert.equal(bodyReads, readsBeforeHistory, 'paging, plans, search, rename and archive must not hydrate full history');
     await assert.rejects(invoke('task:submit',{projectId:project.id,taskId,prompt:'不应执行'}),/先恢复/);
     await invoke('task:archive',{taskId,archived:false});assert.equal((await snapshot()).tasks[0].archivedAt,undefined);
+    const readsBeforeResume = bodyReads;
     await invoke('task:submit',{projectId:project.id,taskId,prompt:'执行计划',mode:'execute',planRunId:run.id});
+    assert.equal(bodyReads, readsBeforeResume + 1, 'resuming hydrates exactly the selected task');
     task=(await snapshot()).tasks[0];const second=task.runs.at(-1);assert.notEqual(second.id,run.id);assert.equal(second.planRunId,run.id);
     await new Promise(r=>setImmediate(r));
     const startMessage=workers.at(-1).sent.find((m:any)=>m.type==='start');
@@ -295,5 +307,5 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const gapDb=new SQL.Database(await fs.readFile(path.join(userData,'local-code.sqlite')));
     const gapStored=JSON.parse(gapDb.exec('SELECT data FROM tasks WHERE id=?',[gapId])[0].values[0][0]);
     assert.equal(gapStored.messages.length,1);assert.equal(gapStored.messages[0].content,'message protocol gap');gapDb.close();
-  } finally { failWrites=false;Store.prototype.flush=originalFlush;Module._load=original;app.emit('before-quit');await fs.rm(home,{recursive:true,force:true}); }
+  } finally { failWrites=false;Store.prototype.flush=originalFlush;Store.prototype.task=originalTask;Store.prototype.tasks=originalTasks;Store.prototype.detail=originalDetail;Module._load=original;app.emit('before-quit');await fs.rm(home,{recursive:true,force:true}); }
 });

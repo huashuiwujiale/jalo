@@ -71,19 +71,20 @@ export class DiagnosticLog {
     return { entries: entries.slice(-1000), incomplete, truncated: entries.length > 1000 };
   }
 }
-export function diagnosticReport(info: AppInfo, tasks: Task[], log: DiagnosticLog) {
+type DiagnosticTask = Pick<Task, 'id' | 'status' | 'archivedAt' | 'currentRunId' | 'error'> & { runs?: (import('../shared/types').Run | import('../shared/types').RunView)[] };
+export function diagnosticReport(info: AppInfo, tasks: DiagnosticTask[], log: DiagnosticLog, taskCount = tasks.length) {
   return {
     formatVersion: 1, exportedAt: new Date().toISOString(),
     privacy: '仅含运行环境、匿名任务统计与结构化事件；不含令牌、服务地址、项目路径、聊天、源码、命令或原始错误正文。',
     app: { version: info.version, packaged: info.packaged, platform: info.platform, arch: info.arch, electron: info.electron, chrome: info.chrome, node: info.node, osRelease: info.osRelease },
-    logs: log.read(), taskCount: tasks.length, taskLimit: 50,
+    logs: log.read(), taskCount, taskLimit: 50,
     tasks: tasks.slice(0, 50).map(task => {
       const run = task.runs?.find(r => r.id === task.currentRunId) || task.runs?.at(-1);
       return {
         id: z.string().uuid().safeParse(task.id).success ? task.id : undefined,
         status: status.safeParse(task.status).success ? task.status : undefined,
         archived: !!task.archivedAt, runCount: task.runs?.length || 0,
-        writtenFiles: run?.changes.filter(c => c.state === 'written' && c.before !== c.after).length || 0,
+        writtenFiles: run?.changes.filter(c => c.state === 'written' && ('changed' in c ? c.changed : c.before !== c.after)).length || 0,
         failedChecks: run?.checks.filter(c => c.status === 'failed').length || 0,
         errorCategory: task.error ? errorCategory(task.error) : undefined,
       };

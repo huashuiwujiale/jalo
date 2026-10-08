@@ -18,7 +18,7 @@ export function runView(run: Run): RunView {
     changes: changes.map(change => ({ ...changeView(change), id: change.id, runId: change.runId, state: change.state, check: change.check, revertedAt: change.revertedAt })),
     hasPlan: !!planText?.trim() };
 }
-function requestTexts(task: Task) {
+export function requestTexts(task: Task) {
   let indexed = requests.get(task);
   if (!indexed || indexed.events !== task.events || indexed.eventCount > task.events.length) {
     indexed = { events: task.events, eventCount: 0, runCount: 0, texts: new Set() }; requests.set(task, indexed);
