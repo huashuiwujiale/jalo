@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { referenceFile, captureReferences, previewFile, referenceContext } from '../engine/project-files';
 import { referenceSchema } from '../shared/validation';
 import { emptyView, viewSchema } from '../shared/session';
-import { mentionAt, insertMention } from '../src/mentions';
+import { mentionAt, insertMention, mentionSegments, referenceName } from '../src/mentions';
 
 test('whole references capture every line beyond preview and range limits, retaining CRLF and version', async()=>{
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'jalo-whole-'));
@@ -64,4 +64,25 @@ test('mentions use the caret and preserve surrounding text, without treating ema
   const result=insertMention(text,mention,'src/member/index.vue');
   assert.equal(result.text,'请修改 src/member/index.vue  后保留说明');
   assert.equal(result.text.slice(0,result.caret),'请修改 src/member/index.vue ');
+});
+
+test('file-name presentation keeps exact paths for same-name references and repeated mentions', () => {
+  const ref=(path:string)=>({projectId:randomUUID(),path,startLine:1,endLine:1,version:'a'.repeat(64)});
+  const a=ref('src/sale/index.vue'),b=ref('src/member/index.vue');
+  const text=`修改 ${a.path}，参考 ${b.path}\n再检查 ${a.path} 的文字。`;
+  const parts=mentionSegments(text,[a,b]);
+  assert.equal(parts.map(p=>p.text).join(''),text);
+  assert.deepEqual(parts.filter(p=>p.reference).map(p=>p.reference?.path),[a.path,b.path,a.path]);
+  assert.deepEqual(parts.filter(p=>p.reference).map(p=>referenceName(p.text)),['index.vue','index.vue','index.vue']);
+});
+
+test('mention presentation ignores unmatched paths and partial filenames, supports spaces and special characters', () => {
+  const ref=(path:string)=>({projectId:randomUUID(),path,startLine:1,endLine:1,version:'a'.repeat(64)});
+  const refs=[ref('a.vue'),ref('src/a.vue'),ref('src/我的 文件[1].vue')];
+  const text='src/a.vue a.vue src/我的 文件[1].vue not-a.vue a.vue.bak other/a.vue';
+  const parts=mentionSegments(text,refs);
+  assert.equal(parts.map(p=>p.text).join(''),text);
+  assert.deepEqual(parts.filter(p=>p.reference).map(p=>p.text),['src/a.vue','a.vue','src/我的 文件[1].vue']);
+  assert.deepEqual(mentionSegments('<b>普通文字</b>',[]),[{text:'<b>普通文字</b>'}]);
+  assert.deepEqual(mentionSegments('',refs),[]);
 });

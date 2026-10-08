@@ -134,6 +134,16 @@ html, body, #root { width: 100%; height: 100%; overflow: hidden; }
 .rollback-modal>p { padding:0 16px;font-size:13px; }
 button:disabled { cursor:not-allowed;opacity:.5; }
 .mention-input { position:relative; width:100%; min-width:0; }
+.mention-editor { position:relative; width:100%; min-height:85px; max-height:200px; overflow-y:auto; resize:vertical; padding:17px 18px; outline:none; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.7; font-size:12px; cursor:text; }
+.mention-editor[data-empty=true]::before { content:attr(data-placeholder); color:#a6adb5; pointer-events:none; position:absolute; left:18px; right:18px; }
+.mention-editor[aria-disabled=true] { cursor:default; }
+.inline-file-reference { display:inline-flex; align-items:center; gap:5px; max-width:100%; vertical-align:baseline; white-space:nowrap; color:#477fd0; font-weight:500; user-select:all; }
+.inline-file-reference svg { flex:none; align-self:center; }
+.inline-file-reference .reference-name { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.inline-file-reference.invalid { color:#a65345; }
+.reference-chips > span { max-width:100%; background:#eef3fc; color:#477fd0; }
+.reference-chips > span > button:first-child { min-width:0; }
+.reference-chips .reference-name { min-width:0; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .mention-menu { position:fixed; z-index:60; background:#fff; border:1px solid #dce3df; border-radius:14px; box-shadow:0 10px 36px #20372c22; padding:8px; font-size:12px; overflow:auto; }
 .mention-heading { display:flex; gap:12px; justify-content:space-between; color:#597164; padding:5px 8px 9px; }
 .mention-heading span { color:#8b9590; }
