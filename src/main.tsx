@@ -20,6 +20,7 @@ import { emptySession, emptyView, rememberView, restoreView, viewKey, type Sessi
 import { capturePosition, restorePosition } from './session-scroll';
 import { useEventHistory } from './event-history';
 import { HistoryControls, PlanActions } from './history-controls';
+import { ViewSaver } from './view-saver';
 declare global { interface Window { localCode: Api } }
 const statusText: Record<TaskSummary['status'], string> = { queued: '排队中', running: '执行中', waiting: '等待确认', completed: '本轮结束', failed: '执行失败', cancelled: '已停止', interrupted: '已中断' };
 const api = window.localCode;
@@ -49,6 +50,9 @@ function App() {
   const conversation = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const previousScrollTop = useRef(0);
+  const scrollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const saver = useRef<ViewSaver | undefined>(undefined);
+  saver.current ??= new ViewSaver(view => api.saveView(view), view => rememberView(sessions.current, view), e => fail(e));
   const [showLatest, setShowLatest] = useState(false);
   const scrollToLatest = (save = true) => {
     const element = conversation.current;
@@ -64,7 +68,7 @@ function App() {
   const pauseFollowing = () => {
     followLatest.current = false;
     setShowLatest(true);
-    rememberCurrent();
+    schedulePosition();
   };
   const handleConversationScroll = () => {
     const element = conversation.current;
@@ -79,7 +83,7 @@ function App() {
     else if (movedUp) followLatest.current = false;
     previousScrollTop.current = scrollTop;
     setShowLatest(!followLatest.current);
-    rememberCurrent();
+    schedulePosition();
   };
   const project = state.projects.find(p => p.id === projectId);
   const selected = state.tasks.find(t => t.id === taskId);
@@ -96,16 +100,20 @@ function App() {
   const invalidReferences = references.some(r => r.projectId !== projectId);
   const projectBusy = state.tasks.some(t => t.projectId === projectId && busyStatuses.includes(t.status));
   function persistView(view: SessionView) {
-    rememberView(sessions.current, view);
-    void api.saveView(view).catch(fail);
+    saver.current!.schedule(view);
+  }
+  function schedulePosition() {
+    if (!sessionReady || pendingPosition.current) return;
+    scrollTimer.current ??= setTimeout(() => { scrollTimer.current = undefined; rememberCurrent(); }, 150);
   }
   function rememberCurrent() {
+    clearTimeout(scrollTimer.current); scrollTimer.current = undefined;
     if (!sessionReady || pendingPosition.current) return;
     const view = { ...currentView.current, scroll: capturePosition(conversation.current, followLatest.current) };
     currentView.current = view; persistView(view);
   }
   function openView(view: SessionView, saveCurrent = true) {
-    if (saveCurrent) rememberCurrent();
+    if (saveCurrent) { rememberCurrent(); saver.current!.flush(); }
     currentView.current = view; pendingPosition.current = view.scroll;
     setProjectId(view.projectId); setTaskId(view.taskId); setPrompt(view.prompt); setMode(view.mode); setReferences(view.references);
     setRunId(view.runId); setTab(view.tab); setPicker(undefined); setSelectedFile(''); setError('');
@@ -137,14 +145,17 @@ function App() {
   }, [sessionReady, viewRevision, history.restoring, history.events.length, task?.id]);
   useLayoutEffect(() => {
     if (!sessionReady) return;
-    currentView.current = { projectId,taskId,prompt,mode,references,runId,tab,scroll:pendingPosition.current || capturePosition(conversation.current,followLatest.current) };
+    currentView.current = { projectId,taskId,prompt,mode,references,runId,tab,scroll:pendingPosition.current || currentView.current.scroll };
     persistView(currentView.current);
   }, [sessionReady,viewRevision,projectId,taskId,prompt,mode,references,runId,tab]);
   useEffect(() => {
     if (!sessionReady) return;
-    const flush = () => { api.flushView({ ...currentView.current, scroll:pendingPosition.current || capturePosition(conversation.current,followLatest.current) }); };
+    const flush = () => {
+      clearTimeout(scrollTimer.current); scrollTimer.current = undefined;
+      saver.current!.close({ ...currentView.current, scroll:pendingPosition.current || capturePosition(conversation.current,followLatest.current) }, view => api.flushView(view));
+    };
     window.addEventListener('beforeunload',flush);
-    return () => window.removeEventListener('beforeunload',flush);
+    return () => { window.removeEventListener('beforeunload',flush); flush(); };
   },[sessionReady]);
   useLayoutEffect(() => {
     if (followLatest.current && !pendingPosition.current) scrollToLatest(false);
@@ -161,7 +172,8 @@ function App() {
   }, [sessionReady, projectId, taskId, task?.id]);
   const chooseProject = (id: string) => {
     if (sending || id === projectId || !state.projects.some(p => p.id === id)) return;
-    openView(restoreView(sessions.current,state,{projectId:id,taskId:sessions.current.projectTasks[id] || ''}));
+    rememberCurrent(); saver.current!.flush();
+    openView(restoreView(sessions.current,state,{projectId:id,taskId:sessions.current.projectTasks[id] || ''}), false);
   };
   const addProject = async () => { if(sending)return;setSending(true);try { const p = await api.addProject(); if (p) { const snapshot=await api.snapshot();setState(current => current.sequence > snapshot.sequence ? current : snapshot);openView(restoreView(sessions.current,snapshot,{projectId:p.id,taskId:sessions.current.projectTasks[p.id] || ''})); } } catch (e) { fail(e); } finally {setSending(false);} };
   const submit = async (planRunId?: string) => {
@@ -176,7 +188,7 @@ function App() {
       const id = await api.submit({ projectId, prompt: planRunId ? '按关联计划执行，先重新读取文件，再完成修改和核验。' : prompt, mode: planRunId ? 'execute' : mode, references: planRunId ? [] : references, ...(planRunId ? { planRunId } : {}), ...(mode === 'review' && !planRunId && run ? { reviewRunId: run.id } : {}), ...(taskId ? { taskId } : {}) });
       const next: SessionView = { ...submitted, taskId:id, runId:'', mode:planRunId ? 'execute' : mode, prompt:planRunId ? submitted.prompt : '', references:planRunId ? submitted.references : [], scroll:emptyView(projectId).scroll };
       if(!submitted.taskId)persistView({...next,taskId:''});
-      openView(next,false);
+      saver.current!.flush(); openView(next,false);
     } catch (e) { fail(e); }
     finally { setSending(false); }
   };
@@ -195,7 +207,7 @@ function App() {
     <main className="workspace">
       <header className="topbar"><div className="breadcrumb"><Folder size={15}/><span>{project?.name || '选择工作空间'}</span><span className="slash">/</span><strong>{task ? '任务详情' : '新建任务'}</strong></div><button className="model-pill" onClick={() => setSettingsOpen(true)}><span className={state.settings.model ? 'green-dot' : 'gray-dot'}/><span>{state.settings.model || '连接本地模型'}</span><ChevronDown size={13}/></button></header>
       <div className="conversation-pane">
-      <div className="conversation" key={viewKey(projectId,taskId)} ref={conversation} onScroll={handleConversationScroll} onToggleCapture={() => rememberCurrent()}
+      <div className="conversation" key={viewKey(projectId,taskId)} ref={conversation} onScroll={handleConversationScroll} onToggleCapture={() => schedulePosition()}
         onWheel={event => { if (event.deltaY < 0) pauseFollowing(); }}
         onKeyDown={event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) pauseFollowing(); }}
         onClickCapture={event => { if ((event.target as HTMLElement).closest('summary')) pauseFollowing(); }}

@@ -40,7 +40,7 @@ const revisions=new Map();
 const catalog=()=>({...state,sequence,tasks:state.tasks.map(task=>taskSummary(task,revisions.get(task.id)||0))});
 function sender(event){assert.equal(event.sender,win.webContents);assert.equal(event.senderFrame,win.webContents.mainFrame);}
 const fixture=id=>state.projects.find(p=>p.id===id);
-let delayReference=false;
+let delayReference=false, viewSaves=0;
 let failCopy=false, failLink=false;const copies=[],links=[];
 ipcMain.handle('app:copy-text',(event,text)=>{sender(event);if(failCopy)throw new Error('模拟复制失败');copies.push(text);});
 ipcMain.handle('app:open-link',(event,url)=>{sender(event);if(failLink)throw new Error('模拟打开失败');links.push(url);});
@@ -54,7 +54,7 @@ ipcMain.handle('task:detail',(event,id)=>{sender(event);return taskDetail(state.
 ipcMain.handle('task:events',(event,input)=>{sender(event);return pageTaskEvents(state.tasks.find(task=>task.id===input.taskId),input.before);});
 ipcMain.handle('tasks:search',(event,input)=>{sender(event);return filterTasks(state.tasks,input.projectId,input.archived,input.query).map(task=>task.id);});
 ipcMain.handle('session:load',event=>{sender(event);return session.read();});
-ipcMain.handle('session:save',(event,view)=>{sender(event);return session.save(viewSchema.parse(view));});
+ipcMain.handle('session:save',(event,view)=>{sender(event);viewSaves++;return session.save(viewSchema.parse(view));});
 ipcMain.on('session:flush',(event,view)=>{try{sender(event);session.update(viewSchema.parse(view));session.flush();event.returnValue={ok:true};}catch(error){event.returnValue={ok:false,error:error.message};}});
 ipcMain.handle('task:submit',(event,input)=>{
   sender(event);if(failSubmit)throw new Error('模拟提交失败');
@@ -84,6 +84,14 @@ app.whenReady().then(async()=>{
   server=await createServer({root:project,cacheDir:path.join(home,'vite-cache'),server:{host:'127.0.0.1',port:0}});await server.listen();
   const url=`http://127.0.0.1:${server.httpServer.address().port}`;await openWindow(url);
   await waitFor("document.querySelector('textarea').value==='草稿 A'");
+  await new Promise(r=>setTimeout(r,450));
+  const beforeTyping=viewSaves;
+  await js(`(()=>{window.positionScans=0;const pane=document.querySelector('.conversation'),original=pane.querySelectorAll.bind(pane);pane.querySelectorAll=(selector)=>{if(selector==='[data-event-id]')window.positionScans++;return original(selector);};})()`);
+  for(let i=0;i<12;i++)await input('连续输入 '+i);
+  await new Promise(r=>setTimeout(r,500));
+  assert.ok(viewSaves-beforeTyping<=2, 'typing should coalesce save IPC');
+  assert.equal(await js('window.positionScans'),0,'typing should not scan conversation nodes');
+  await input('草稿 A');
   const markdown="document.querySelector('[data-event-id=\"event-47\"]')";
   assert.equal(await js(`${markdown}.querySelector('h1').textContent`),'Markdown 验收');
   assert.equal(await js(`${markdown}.querySelector('pre code').textContent`),markdownCode);
