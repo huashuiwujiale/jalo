@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Code2, LoaderCircle } from 'lucide-react';
 import type { Api, StreamFrame, StreamState } from '../shared/types';
 import { Markdown } from './markdown';
+import { StreamPublisher } from './stream-publisher';
 
 export class StreamAccumulator {
   state: StreamState;
@@ -19,15 +20,16 @@ export class StreamAccumulator {
   }
 }
 
-/** Tokens update this component only, at most once per animation frame. */
+/** Tokens update this component only, with a bounded Markdown parse frequency. */
 export const StreamingReply = React.memo(function StreamingReply({ api, taskId, runId, initial, onContent }: { api: Api; taskId: string; runId: string; initial?: StreamState; onContent: () => void }) {
   const accumulator = useRef(new StreamAccumulator(taskId, runId));
   const [state, setState] = useState(() => { accumulator.current.seed(initial); return accumulator.current.state; });
   const onChange = useRef(onContent); onChange.current = onContent;
+  const publisher = useRef<StreamPublisher | undefined>(undefined);
   useEffect(() => {
-    let frame: number | undefined, disposed = false, recovering = false;
-    const publish = () => { frame = undefined; if (!disposed) setState(accumulator.current.state); };
-    const schedule = () => { frame ??= requestAnimationFrame(publish); };
+    let disposed = false, recovering = false;
+    const updates = new StreamPublisher(setState); publisher.current = updates;
+    const schedule = () => updates.update(accumulator.current.state);
     const off = api.onDelta(value => {
       const result = accumulator.current.apply(value);
       if (result === 'changed') schedule();
@@ -36,9 +38,9 @@ export const StreamingReply = React.memo(function StreamingReply({ api, taskId, 
         void api.taskDetail(taskId).then(detail => { if (!disposed && accumulator.current.seed(detail.stream)) schedule(); }).catch(() => {}).finally(() => { recovering = false; });
       }
     });
-    return () => { disposed = true; off(); if (frame !== undefined) cancelAnimationFrame(frame); };
+    return () => { disposed = true; off(); updates.dispose(); publisher.current = undefined; };
   }, [api, taskId, runId]);
-  useEffect(() => { if (accumulator.current.seed(initial)) setState(accumulator.current.state); }, [initial]);
+  useEffect(() => { if (accumulator.current.seed(initial)) publisher.current?.update(accumulator.current.state); }, [initial]);
   useLayoutEffect(() => { onChange.current(); }, [state.text, state.ended]);
   if (state.ended || !state.text) return null;
   return <article className="message assistant streaming-reply"><div className="message-author"><span className="avatar assistant-avatar"><Code2 size={15}/></span><strong>Jalo</strong><LoaderCircle className="spin" size={13}/></div><div className="message-text"><Markdown text={state.text}/><span className="cursor"/></div></article>;

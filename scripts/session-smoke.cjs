@@ -120,6 +120,20 @@ app.whenReady().then(async()=>{
   win.webContents.send('task:delta',{kind:'append',taskId:t,runId,version:3,offset:streaming.length,text:'\n```\n\n**生成完成**'});
   await waitFor("document.querySelector('.streaming-reply .markdown-body strong')?.textContent==='生成完成'");
   win.webContents.send('task:delta',{kind:'end',taskId:t,runId,version:4,text:''});await waitFor("!document.querySelector('.streaming-reply')");
+  const longReply='# 长回复\n\n'+'较长的流式正文。'.repeat(3000);
+  win.webContents.send('task:delta',{kind:'reset',taskId:t,runId,version:5,text:''});
+  win.webContents.send('task:delta',{kind:'append',taskId:t,runId,version:6,offset:0,text:longReply});
+  await waitFor("document.querySelector('.streaming-reply h1')?.textContent==='长回复'");
+  await js("window.streamRenders=0;window.streamObserver=new MutationObserver(()=>window.streamRenders++);window.streamObserver.observe(document.querySelector('.streaming-reply .markdown-body'),{subtree:true,childList:true,characterData:true});");
+  let streamOffset=longReply.length;
+  for(let i=0;i<12;i++){
+    const text=` 增量${i}`;win.webContents.send('task:delta',{kind:'append',taskId:t,runId,version:7+i,offset:streamOffset,text});streamOffset+=text.length;
+    await new Promise(r=>setTimeout(r,40));
+  }
+  await waitFor("document.querySelector('.streaming-reply').textContent.includes('增量11')");
+  assert.ok(await js('window.streamRenders')<=4,'long stream should bound Markdown reparses');
+  await js('window.streamObserver.disconnect()');
+  win.webContents.send('task:delta',{kind:'end',taskId:t,runId,version:19,text:''});await waitFor("!document.querySelector('.streaming-reply')");
   if(process.env.JALO_MARKDOWN_SCREENSHOT){await js(`${markdown}.scrollIntoView({block:'center'})`);await new Promise(r=>setTimeout(r,80));fs.writeFileSync(process.env.JALO_MARKDOWN_SCREENSHOT,(await win.webContents.capturePage()).toPNG());}
   await js("(()=>{const pane=document.querySelector('.conversation'),node=pane.querySelector('[data-event-id=\"event-20\"]');pane.scrollTop+=node.getBoundingClientRect().top-pane.getBoundingClientRect().top;})()");
   await new Promise(r=>setTimeout(r,80));
