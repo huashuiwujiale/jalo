@@ -40,7 +40,7 @@ export interface ToolOptions {
   root: string; signal: AbortSignal; timeout: number; backupDir: string;
   emit: (event: EngineEvent) => void;
   approve: (approval: Approval) => Promise<boolean>;
-  changes?: Change[]; mode?: Mode; runId?: string; reviewChanges?: Change[]; checkpoint?: (change: RunChange) => Promise<void>;
+  changes?: Change[]; mode?: Mode; runId?: string; reviewChanges?: Pick<Change, 'path' | 'patch'>[]; checkpoint?: (change: RunChange) => Promise<void>;
 }
 export class ToolRegistry {
   private root = '';

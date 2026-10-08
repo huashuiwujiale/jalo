@@ -1,4 +1,5 @@
-import type { Approval, EngineEvent, Settings, Task, Message } from '../shared/types';
+import type { Approval, EngineEvent, Settings } from '../shared/types';
+import { MessagePatchSender, type WorkerInput } from '../shared/worker-wire';
 import { LMStudioProvider } from './provider';
 import { ToolRegistry } from './tools';
 import { captureReferences } from './project-files';
@@ -10,9 +11,14 @@ const controller = new AbortController();
 let pending: { id: string; resolve: (allow: boolean) => void } | undefined;
 let started = false;
 let runId: string | undefined;
-let archivedMessages: Message[] = [];
+let messages: MessagePatchSender;
 const checkpoints = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
-const emit = (event: EngineEvent) => port.postMessage({ ...event, runId, ...(event.type === 'messages' ? { messages: [...archivedMessages, ...event.messages] } : {}), ...(event.type === 'event' ? { event: { ...event.event, runId } } : {}) });
+const emit = (event: EngineEvent) => {
+  if (event.type === 'messages') {
+    const patch = messages.update(event.messages);
+    if (patch) port.postMessage({ ...patch, runId });
+  } else port.postMessage({ ...event, runId, ...(event.type === 'event' ? { event: { ...event.event, runId } } : {}) });
+};
 const approve = (approval: Approval) => new Promise<boolean>(resolve => {
   pending = { id: approval.id, resolve }; emit({ type: 'approval', approval });
 });
@@ -30,22 +36,23 @@ port.on('message', async ({ data }: any) => {
   }
   if (data.type !== 'start' || started) return;
   started = true;
-  const { task, root, backupDir } = data as { task: Task; root: string; backupDir: string };
-  runId = task.currentRunId;
-  const run = task.runs?.find(r => r.id === runId);
+  const { input, root, backupDir } = data as { input: WorkerInput; root: string; backupDir: string };
+  runId = input?.run?.id;
   const settings: Settings = { ...data.settings };
   try {
-    if (!run) throw new Error('缺少本轮执行记录，禁止执行');
+    const run = input?.run;
+    if (!run?.id) throw new Error('缺少本轮执行记录，禁止执行');
+    messages = new MessagePatchSender(input.messages);
     emit({ type: 'progress', progress: { phase: 'preparing', since: Date.now() } });
-    await captureReferences({ id: task.projectId, name: '', path: root }, run.references);
+    await captureReferences({ id: input.projectId, name: '', path: root }, run.references);
     const provider = new LMStudioProvider(settings);
     emit({ type: 'progress', progress: { phase: 'connecting', since: Date.now() } });
     const models = await provider.list(controller.signal);
-    const model = models.find(m => m.key === task.model || m.instances.some(i => i.id === task.model));
+    const model = models.find(m => m.key === input.model || m.instances.some(i => i.id === input.model));
     if (!model) throw new Error('选择的模型不存在，请刷新模型列表');
     if (model.toolUse === false) throw new Error('LM Studio 标记此模型未针对工具调用训练，请选择其他模型');
     settings.contextLength = Math.min(settings.contextLength, model.maxContext);
-    const instance = model.instances.find(i => i.id === task.model) || model.instances[0];
+    const instance = model.instances.find(i => i.id === input.model) || model.instances[0];
     if (instance) {
       settings.model = instance.id;
       settings.contextLength = Math.min(settings.contextLength, instance.contextLength);
@@ -54,11 +61,8 @@ port.on('message', async ({ data }: any) => {
       settings.model = await provider.load(model.key, settings.contextLength, controller.signal);
     }
     if (settings.maxTokens >= settings.contextLength / 2) throw new Error('已加载模型的上下文过小，请卸载后使用更大上下文重新加载，或降低最大输出');
-    const registry = new ToolRegistry({ root, backupDir, signal: controller.signal, timeout: settings.commandTimeout, emit, approve, changes: task.changes, mode: run.mode, runId, reviewChanges: run.mode === 'review' ? task.runs?.find(r => r.id === run.reviewRunId)?.changes.filter(c => c.state === 'written') || [] : undefined, checkpoint: change => new Promise<void>((resolve, reject) => { checkpoints.set(change.id, { resolve, reject }); emit({ type: 'checkpoint', checkpoint: change }); }) });
-    // A linked execution/review starts with fresh file evidence, while retaining history in storage.
-    const fresh = !!run.planRunId || run.mode === 'review';
-    if (fresh) archivedMessages = task.messages.slice(0, -1);
-    await new TaskRunner(provider, registry, settings, emit, controller.signal).run({ messages: fresh ? task.messages.slice(-1) : task.messages });
+    const registry = new ToolRegistry({ root, backupDir, signal: controller.signal, timeout: settings.commandTimeout, emit, approve, changes: input.changes, mode: run.mode, runId, reviewChanges: input.reviewChanges, checkpoint: change => new Promise<void>((resolve, reject) => { checkpoints.set(change.id, { resolve, reject }); emit({ type: 'checkpoint', checkpoint: change }); }) });
+    await new TaskRunner(provider, registry, settings, emit, controller.signal).run({ messages: input.messages });
   } catch (error) {
     emit({ type: 'done', status: controller.signal.aborted ? 'cancelled' : 'failed', error: controller.signal.aborted ? undefined : (error as Error).message });
   }

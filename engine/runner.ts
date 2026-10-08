@@ -51,6 +51,7 @@ export class TaskRunner {
       await this.tools.init();
       const instructions = await this.tools.projectInstructions();
       messages = [{ role: 'system', content: systemPrompt + '\n' + modePrompt + '\n\n' + instructions }, ...task.messages.filter(m => m.role !== 'system')];
+      this.emit({ type: 'messages', messages });
       if (checkCapability) {
         this.progress('probing');
         this.notice('正在验证模型的结构化工具调用能力…');

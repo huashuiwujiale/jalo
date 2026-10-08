@@ -126,7 +126,7 @@ test('compaction is persisted before requesting the model, including when genera
     const messages:Message[]=[{role:'user',content:'分析文件'},c.message,{role:'tool',tool_call_id:c.message.tool_calls![0].id,content:'共 200 行；版本 123456789abc\n'+'text\n'.repeat(8000)}];
     await new TaskRunner(provider,registry,defaults,emit,signal.signal).run({messages},false);
     assert.equal(requests.length,1);assert.ok(requests[0].some(m=>m.contextMemory));
-    const persisted=events.find(e=>e.type==='messages');assert.ok(persisted?.type==='messages');
+    const persisted=events.findLast(e=>e.type==='messages');assert.ok(persisted?.type==='messages');
     assert.deepEqual(persisted.messages,requests[0]);
     const usage=events.find(e=>e.type==='context');assert.ok(usage?.type==='context');assert.equal(usage.usage.compactions,1);
     assert.equal((events.at(-1) as any).status,'failed');

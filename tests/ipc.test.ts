@@ -11,6 +11,7 @@ import { version, checkSyntax } from '../engine/syntax';
 import { emptyView, viewKey } from '../shared/session';
 import { Store, taskSaveDelay } from '../electron/store';
 import { streamDelay } from '../electron/ipc-updates';
+import { MessagePatchSender } from '../shared/worker-wire';
 const require = createRequire(import.meta.url);
 test('main IPC creates linked runs, persists checkpoints before acknowledgement, validates references and gates rollback', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(),'jalo-ipc-'));
@@ -100,6 +101,12 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await invoke('task:rename',{taskId,title:'  新的任务名称  '});
     assert.equal((await snapshot()).tasks[0].title,'新的任务名称');
     const worker=workers.at(-1);worker.emit('message',{type:'done',runId:'other-run',status:'completed'});assert.equal((await snapshot()).tasks[0].status,'running');
+    const firstInput=worker.sent.find((m:any)=>m.type==='start').input;
+    assert.ok(!('content' in firstInput.run.references[0]));
+    const planMessages=[{role:'system' as const,content:'plan rules'},...firstInput.messages];
+    const planSender=new MessagePatchSender(firstInput.messages), setupPatch=planSender.update(planMessages)!;
+    worker.emit('message',{...setupPatch,runId:'other-run'});
+    worker.emit('message',{...setupPatch,runId:run.id});worker.emit('message',{...setupPatch,runId:run.id});
     worker.emit('message',{type:'progress',runId:'other-run',progress:{phase:'generating',since:1}});
     assert.equal((await snapshot()).tasks[0].runs[0].progress.phase,'preparing');
     worker.emit('message',{type:'progress',runId:run.id,progress:{phase:'waiting_model',since:Date.now(),step:1,maxSteps:30}});
@@ -130,6 +137,8 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const savedPlan='开头的完整约束\n'+'计划内容。'.repeat(3000)+'\n读取 a.txt，再将 old 改为 new，重新读取验收。';
     const beforeEvents = flushes;
     const beforeUpdates=deliveries.filter(delivery=>delivery.channel==='app:update').length;
+    planMessages.push({role:'assistant',content:savedPlan});
+    worker.emit('message',{...planSender.update(planMessages),runId:run.id});
     worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'message',role:'assistant',text:'临时思路，不应成为执行计划'}});
     for(let i=0;i<605;i++)worker.emit('message',{type:'event',runId:run.id,event:{id:randomUUID(),runId:run.id,at:Date.now(),kind:'notice',text:`历史记录 ${i}`}});
     assert.equal(flushes,beforeEvents);
@@ -157,11 +166,20 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     task=(await snapshot()).tasks[0];const second=task.runs.at(-1);assert.notEqual(second.id,run.id);assert.equal(second.planRunId,run.id);
     await new Promise(r=>setImmediate(r));
     const startMessage=workers.at(-1).sent.find((m:any)=>m.type==='start');
-    assert.ok(startMessage.task.messages.at(-1).content.includes(savedPlan));assert.ok(!startMessage.task.messages.at(-1).content.includes('临时思路'));
+    assert.ok(startMessage.input.messages.at(-1).content.includes(savedPlan));assert.ok(!startMessage.input.messages.at(-1).content.includes('临时思路'));
+    assert.equal(startMessage.input.messages.length,1);assert.ok(!('task' in startMessage));
+    assert.ok(!('runs' in startMessage.input));assert.ok(!('events' in startMessage.input));
+    const linkedSender=new MessagePatchSender(startMessage.input.messages);
+    const linkedMessages=[{role:'system' as const,content:'execute rules'},...startMessage.input.messages];
+    workers.at(-1).emit('message',{...linkedSender.update(linkedMessages),runId:second.id});
+    linkedMessages.push({role:'assistant',content:'linked round context'});
+    workers.at(-1).emit('message',{...linkedSender.update(linkedMessages),runId:second.id});
     const w=workers.at(-1), change={id:randomUUID(),runId:second.id,path:'a.txt',before:'old',after:'new',beforeVersion:version('old'),afterVersion:version('new'),check:checkSyntax('a.txt','new'),state:'prepared',patch:'-old\n+new'};
     w.emit('message',{type:'checkpoint',runId:second.id,checkpoint:change});
     assert.ok(w.sent.some((m:any)=>m.type==='checkpoint-ack'&&m.id===change.id));
-    const SQL=await require('sql.js')();const db=new SQL.Database(await fs.readFile(path.join(userData,'local-code.sqlite')));assert.equal(db.exec('SELECT count(*) FROM checkpoints')[0].values[0][0],1);db.close();
+    const SQL=await require('sql.js')();const db=new SQL.Database(await fs.readFile(path.join(userData,'local-code.sqlite')));assert.equal(db.exec('SELECT count(*) FROM checkpoints')[0].values[0][0],1);
+    const stored=JSON.parse(db.exec('SELECT data FROM tasks WHERE id=?',[taskId])[0].values[0][0]);
+    assert.deepEqual(stored.messages,[...planMessages,...linkedMessages]);db.close();
     await fs.writeFile(path.join(root,'a.txt'),'new');w.emit('message',{type:'change',runId:second.id,change:{path:'a.txt',before:'old',after:'new',patch:change.patch},checkpoint:{...change,state:'written'}});
     const patch=await invoke('changes:patch',{taskId,runId:second.id,path:'a.txt'});assert.equal(patch.patch,change.patch);
     const detail=await invoke('task:detail',taskId);assert.equal(detail.runs.at(-1).changes[0].patchVersion,patch.version);
@@ -260,5 +278,15 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal(retried.status,'running'); assert.equal(workers.length,beforeFailure+1);
     assert.equal(retried.events.filter((e:any)=>e.text==='pending history').length,1);
     workers.at(-1).emit('message',{type:'done',runId:retried.currentRunId,status:'completed'});
+    // A missing patch must stop this run without replacing its durable context.
+    const gapId=await invoke('task:submit',{projectId:project.id,prompt:'message protocol gap'});
+    const gapTask=(await snapshot()).tasks.find((t:any)=>t.id===gapId), gapWorker=workers.at(-1);
+    gapWorker.emit('message',{type:'message-patch',runId:gapTask.currentRunId,baseVersion:1,version:2,offset:0,remove:1,messages:[]});
+    assert.ok(gapWorker.killed);
+    const gapResult=(await snapshot()).tasks.find((t:any)=>t.id===gapId);
+    assert.equal(gapResult.status,'failed');assert.match(gapResult.error,/同步顺序/);
+    const gapDb=new SQL.Database(await fs.readFile(path.join(userData,'local-code.sqlite')));
+    const gapStored=JSON.parse(gapDb.exec('SELECT data FROM tasks WHERE id=?',[gapId])[0].values[0][0]);
+    assert.equal(gapStored.messages.length,1);assert.equal(gapStored.messages[0].content,'message protocol gap');gapDb.close();
   } finally { failWrites=false;Store.prototype.flush=originalFlush;Module._load=original;app.emit('before-quit');await fs.rm(home,{recursive:true,force:true}); }
 });

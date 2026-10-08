@@ -19,7 +19,8 @@ import { changeView, searchTaskIds, taskDetail, taskSummary } from '../shared/ta
 import { ReplyStream, UpdateBatch } from './ipc-updates';
 import { fileNameIndex } from '../engine/file-search';
 import { webLink } from '../shared/markdown';
-import { busyStatuses, type AppInfo, type EngineEvent, type Settings, type Snapshot, type Task, type Run, type Progress, type TaskSummary } from '../shared/types';
+import { workerInput, MessagePatchReceiver, type WorkerEvent } from '../shared/worker-wire';
+import { busyStatuses, type AppInfo, type Settings, type Snapshot, type Task, type Run, type Progress, type TaskSummary } from '../shared/types';
 
 // Keep legacy identity when upgrading: macOS safeStorage keys also depend on the app name.
 const legacyDataPath = path.join(app.getPath('appData'), 'Local Code');
@@ -115,10 +116,11 @@ function pump() {
   try {
     task.status = 'running'; task.error = undefined;
     progress(task, 'preparing');
+    const payload = workerInput(task), messageUpdates = new MessagePatchReceiver(payload.archiveLength);
     const worker = utilityProcess.fork(path.join(__dirname, 'worker.cjs'), [], { serviceName: 'Jalo Task', stdio: 'pipe' });
     active = { task, worker, pids: new Set() };
     diagnostics.record({ event: 'task_started', taskId: task.id, runId: task.currentRunId });
-    worker.on('message', (event: EngineEvent) => {
+    worker.on('message', (event: WorkerEvent) => {
       if (active?.worker !== worker || quitting || event.runId !== task.currentRunId) return;
       try {
         const run = currentRun(task);
@@ -142,7 +144,13 @@ function pump() {
         if (event.type === 'check' && run) run.checks.push(event.check);
         if (event.type === 'process') { if (event.running) { active.pids.add(event.pid); if (run?.progress?.phase !== 'stopping') { progress(task, 'command'); persist(task, 'deferred'); } } else { active.pids.delete(event.pid); fileNameIndex.clear(project.path); } return; }
         if (event.type === 'delta') { replies.append(task.id, task.currentRunId!, event.text); return; }
-        if (event.type === 'messages') { task.messages = event.messages; persist(task, 'deferred', task.currentRunId, false); return; }
+        if (event.type === 'message-patch') {
+          let changed: boolean;
+          try { changed = messageUpdates.apply(task, event); }
+          catch (error) { finish(task, 'failed', (error as Error).message); return; }
+          if (changed) persist(task, 'deferred', task.currentRunId, false);
+          return;
+        }
         if (event.type === 'event') { task.events.push(event.event); if (event.event.role === 'assistant') replies.end(task.id); if (event.event.kind === 'error') diagnostics.record({ event: 'tool_error', taskId: task.id, runId: task.currentRunId, errorCategory: errorCategory(event.event.text) }); }
         if (event.type === 'change') { fileNameIndex.clear(project.path); if (run && event.checkpoint) { const i = run.changes.findIndex(c => c.path === event.checkpoint!.path); if (i < 0) run.changes.push(event.checkpoint); else run.changes[i] = event.checkpoint; } const index = task.changes.findIndex(c => c.path === event.change.path); if (index < 0) task.changes.push(event.change); else task.changes[index] = event.change; }
         if (event.type === 'approval') { if (run?.progress?.phase === 'stopping') return; task.approval = event.approval; task.status = 'waiting'; progress(task, 'approval'); }
@@ -156,7 +164,7 @@ function pump() {
     worker.on('exit', code => { if (active?.worker === worker) { diagnostics.record({ event: 'worker_exit', taskId: task.id, runId: task.currentRunId, exitCode: code }); finish(task, 'interrupted', `任务进程意外退出（${code}）。${stderr.slice(-500)} 请检查修改后手动继续。`); } });
     worker.on('spawn', () => {
       if (active?.worker !== worker || quitting) return;
-      try { worker.postMessage({ type: 'start', task, root: project.path, backupDir: path.join(app.getPath('userData'), 'backups', task.id), settings: configs.get(task.id) || settings() }); }
+      try { worker.postMessage({ type: 'start', input: payload.input, root: project.path, backupDir: path.join(app.getPath('userData'), 'backups', task.id), settings: configs.get(task.id) || settings() }); }
       catch (error) { finish(task, 'failed', (error as Error).message); }
     });
     persist(task);
