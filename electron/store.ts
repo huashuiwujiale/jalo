@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { metrics } from './performance';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Project, Task, Settings, Event, Run, RunChange, TaskSummary, TaskDetail, EventCursor, EventPage, RunView } from '../shared/types';
@@ -244,6 +245,7 @@ export class Store {
     clearTimeout(this.timer); this.timer = undefined;
     if (!this.pending.size && !this.records.size && !this.metadata.size) return;
     let transaction = false;
+    const measured = metrics.start('database_commit');
     try {
       this.db.exec('BEGIN IMMEDIATE'); transaction = true;
       const { heads, savedRuns } = this.writeTasks();
@@ -258,9 +260,10 @@ export class Store {
       for (const [id, head] of heads) this.heads.set(id, head);
       for (const [id, owner] of savedRuns) this.knownRuns.set(id, owner);
       for (const [id, patch] of this.metadata) { const pending = this.pending.get(id); if (pending) Object.assign(pending.task, patch); }
-      this.pending.clear(); this.records.clear(); this.metadata.clear();
+      this.pending.clear(); this.records.clear(); this.metadata.clear(); measured();
     } catch (error) {
       if (transaction) try { this.db.exec('ROLLBACK'); } catch { /* Preserve the original failure. */ }
+      measured(true);
       // Synchronous saves also drain deferred tasks, so notify them on every failure path.
       const failure = error instanceof Error ? error : new Error(String(error));
       const callbacks = new Set([...this.pending.values()].map(entry => entry.onError));

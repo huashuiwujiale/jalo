@@ -55,3 +55,7 @@
 - 当前使用的 1.7B 模型能力有限。软件可以约束权限、拦截部分错误并如实记录结果，不能保证模型总能完成需求。
 
 解析接口依据：[Babel parser](https://babeljs.io/docs/babel-parser)、[Vue SFC parser](https://github.com/vuejs/core/blob/main/packages/compiler-sfc/README.md)、[vue-eslint-parser](https://github.com/vuejs/vue-eslint-parser)。本实现只使用解析入口，不调用编译或代码生成入口。
+
+## 性能回归基线
+
+使用 Node 22.14+ 执行 `node --import tsx scripts/performance-baseline.ts`。脚本只创建临时数据库，以 10000 条历史和 100 次小追加记录启动、详情分页与提交耗时，结束后清理。相同机器及运行时比较结果，不使用跨机器绝对阈值。诊断导出包含最近 128 个匿名耗时样本的 P50/P95、均值及失败计数；不包含路径、聊天或命令。模型首段指标从开始生成请求到首次正文、思考或工具调用活动，不能当作纯正文首 Token。

@@ -1,5 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, shell, utilityProcess, type UtilityProcess } from 'electron';
 import os from 'node:os';
+import { metrics, type Metric } from './performance';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -203,7 +204,8 @@ function pump() {
 function register(channel: string, handler: (...args: any[]) => unknown) {
   ipcMain.handle(channel, async (event, ...args) => {
     if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw new Error('无效的调用来源');
-    try { return await handler(...args); }
+    const measured: Record<string, Metric> = { 'app:snapshot': 'snapshot', 'task:detail': 'task_detail', 'files:search': 'file_search', 'tasks:search': 'task_search' };
+    try { return measured[channel] ? await metrics.measure(measured[channel], () => handler(...args)) : await handler(...args); }
     catch (error) {
       diagnostics.record({ event: 'ipc_error', channel, errorCategory: errorCategory(error) });
       if (error instanceof z.ZodError) {

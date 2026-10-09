@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { metrics } from './performance';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -39,8 +40,19 @@ export const LOG_LIMIT = 512 * 1024;
 export class DiagnosticLog {
   readonly directory: string;
   available = true;
+  private startup?: (failed?: boolean) => void;
+  private generations = new Map<string, (failed?: boolean) => void>();
   constructor(dataDirectory: string) { this.directory = path.join(dataDirectory, 'logs'); }
   record(data: Omit<Entry, 'at' | 'tool' | 'channel'> & { tool?: string; channel?: string }) {
+    if (data.event === 'app_start') this.startup = metrics.start('startup');
+    if (data.event === 'app_ready' || data.event === 'startup_error') { this.startup?.(data.event === 'startup_error'); this.startup = undefined; }
+    if (data.runId && data.event === 'task_phase') {
+      if (data.phase === 'waiting_model') {
+        if (this.generations.size >= 32) this.generations.delete(this.generations.keys().next().value!);
+        this.generations.set(data.runId, metrics.start('model_first_activity'));
+      } else if (data.phase === 'generating') { this.generations.get(data.runId)?.(); this.generations.delete(data.runId); }
+    }
+    if (data.runId && data.event === 'task_finished') { this.generations.get(data.runId)?.(true); this.generations.delete(data.runId); }
     try {
       const entry = entrySchema.parse({ ...data, at: Date.now() });
       fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
@@ -77,7 +89,7 @@ export function diagnosticReport(info: AppInfo, tasks: DiagnosticTask[], log: Di
     formatVersion: 1, exportedAt: new Date().toISOString(),
     privacy: '仅含运行环境、匿名任务统计与结构化事件；不含令牌、服务地址、项目路径、聊天、源码、命令或原始错误正文。',
     app: { version: info.version, packaged: info.packaged, platform: info.platform, arch: info.arch, electron: info.electron, chrome: info.chrome, node: info.node, osRelease: info.osRelease },
-    logs: log.read(), taskCount, taskLimit: 50,
+    logs: log.read(), performance: metrics.snapshot(), taskCount, taskLimit: 50,
     tasks: tasks.slice(0, 50).map(task => {
       const run = task.runs?.find(r => r.id === task.currentRunId) || task.runs?.at(-1);
       return {
