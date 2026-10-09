@@ -243,3 +243,12 @@ test('a corrected ranged edit recovers and resets the failure counter', async ()
     assert.equal(await fs.readFile(path.join(x.root, 'a.txt'), 'utf8'), 'x\ny\n');
   } finally { await x.cleanup(); }
 });
+
+test('step and output limits expose explicit continuation reasons without repeating completed tools', async () => {
+  const x = await run([probe(), call('write_file', { path: 'a.txt', content: 'once' })], { steps: 1 });
+  try { assert.equal((x.events.at(-1) as any).stopReason, 'steps'); assert.equal(await fs.readFile(path.join(x.root, 'a.txt'), 'utf8'), 'once'); }
+  finally { await x.cleanup(); }
+  const y = await run([probe(), { ...call('write_file', { path: 'a.txt', content: 'never' }), finishReason: 'length' }]);
+  try { assert.equal((y.events.at(-1) as any).stopReason, 'output'); await assert.rejects(fs.access(path.join(y.root, 'a.txt'))); }
+  finally { await y.cleanup(); }
+});

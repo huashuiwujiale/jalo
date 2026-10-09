@@ -2,7 +2,7 @@ import type { Change, EngineEvent, FileReference, Message, Mode, Task, Followup,
 
 export interface WorkerInput {
   projectId: string; model: string;
-  run: { id: string; mode: Mode; references: FileReference[]; gitReview?: GitReview };
+  run: { id: string; mode: Mode; references: FileReference[]; gitReview?: GitReview; continuationFiles?: import('./continuation').ContinuationFile[] };
   followups?: Followup[];
   messages: Message[]; changes: Change[]; reviewChanges?: Pick<Change, 'path' | 'patch'>[];
 }
@@ -15,10 +15,12 @@ export type WorkerEvent = Exclude<EngineEvent, { type: 'messages' }> | (MessageP
 export function workerInput(task: Task): { input: WorkerInput; archiveLength: number } {
   const run = task.runs?.find(r => r.id === task.currentRunId);
   if (!run) throw new Error('缺少本轮执行记录，禁止执行');
-  const archiveLength = run.planRunId || run.mode === 'review' ? Math.max(0, task.messages.length - 1) : 0;
+  const start = task.contextStart ?? 0;
+  if (!Number.isSafeInteger(start) || start < 0 || start > task.messages.length) throw new Error('续接上下文边界无效，禁止执行');
+  const archiveLength = run.continuation ? start : run.planRunId || run.mode === 'review' ? Math.max(start, task.messages.length - 1) : start;
   return { archiveLength, input: {
     projectId: task.projectId, model: task.model, followups: task.followups?.filter(f => f.kind === 'steer'),
-    run: { id: run.id, mode: run.mode, references: run.references.map(({ content: _content, ...reference }) => reference), ...(run.gitReview ? { gitReview: { path: run.gitReview.path, version: run.gitReview.version } } : {}) },
+    run: { id: run.id, mode: run.mode, ...(run.continuation ? { continuationFiles: run.continuation.files } : {}), references: run.references.map(({ content: _content, ...reference }) => reference), ...(run.gitReview ? { gitReview: { path: run.gitReview.path, version: run.gitReview.version } } : {}) },
     messages: task.messages.slice(archiveLength), changes: run.mode === 'review' ? [] : task.changes,
     ...(run.mode === 'review' ? { reviewChanges: run.gitReview ? [{ path: run.gitReview.path, patch: run.gitReview.patch }] : task.runs?.find(r => r.id === run.reviewRunId)?.changes
       .filter(c => c.state === 'written').map(({ path, patch }) => ({ path, patch })) || [] } : {}),

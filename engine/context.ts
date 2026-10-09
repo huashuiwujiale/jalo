@@ -2,6 +2,8 @@ import type { Message } from '../shared/types';
 import { modelMessages, type ContextFact, type ContextMemory, type ContextUsage } from '../shared/context';
 import type { ToolDefinition } from './provider';
 
+export class ContextBudgetError extends Error { constructor(message: string) { super(message); this.name = 'ContextBudgetError'; } }
+
 // UTF-8 bytes / 2 is a conservative heuristic, not the model's tokenizer.
 export const estimate = (value: unknown) => Math.ceil(Buffer.byteLength(JSON.stringify(value), 'utf8') / 2);
 const messageTokens = (messages: Message[]) => estimate(modelMessages(messages));
@@ -76,7 +78,7 @@ export function contextUsage(messages: Message[], tools: ToolDefinition[], conte
 export function compactContext(messages: Message[], tools: ToolDefinition[], contextLength: number, maxTokens: number): { messages: Message[]; compacted: boolean; usage: ContextUsage } {
   const before = contextUsage(messages,tools,contextLength,maxTokens);
   const budget = contextLength - before.safetyReserve - maxTokens - before.toolTokens;
-  if (budget <= 0) throw new Error('上下文不足以容纳工具定义，请提高上下文长度或降低最大输出');
+  if (budget <= 0) throw new ContextBudgetError('上下文不足以容纳工具定义，请提高上下文长度或降低最大输出');
   if (messageTokens(messages) <= budget) return { messages, compacted:false, usage:before };
   const units: Message[][] = [];
   for (const m of messages) {
@@ -96,5 +98,5 @@ export function compactContext(messages: Message[], tools: ToolDefinition[], con
     flush();
     if (messageTokens(candidate) <= budget) return { messages:candidate, compacted:true, usage:{...contextUsage(candidate,tools,contextLength,maxTokens),beforeTokens:before.inputTokens,compactions:1} };
   }
-  throw new Error('上下文不足：完整用户要求、项目指令和关键执行记录无法安全保留。请提高上下文长度、降低最大输出，或新建更小的任务；未静默丢弃关键记录。');
+  throw new ContextBudgetError('上下文不足：完整用户要求、项目指令和关键执行记录无法安全保留。请提高上下文长度、降低最大输出，或新建更小的任务；未静默丢弃关键记录。');
 }

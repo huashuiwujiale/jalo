@@ -5,6 +5,7 @@ import { FilePicker, RunPanel, RunResult, modeLabels } from './reliability';
 import type { Mode, FileReference, Api, LocalModel, Settings, Snapshot, TaskSummary, Project, GitReview } from '../shared/types';
 import { busyStatuses, defaults } from '../shared/types';
 import './style.css';
+import { ContinuationDialog } from './continuation-dialog';
 import { GitPanel } from './git-panel';
 import { CommandPanel } from './command-panel';
 import { TimelineRows } from './timeline-rows';
@@ -15,7 +16,6 @@ import { TaskProgress, RecoveryPanel } from './task-progress';
 import { ContextMeter } from './context-usage';
 import { MentionInput } from './mention-input';
 import { referenceName } from './mentions';
-import { recoveryPrompt } from '../shared/progress';
 import { TaskHistory, RemoveProjectDialog } from './task-history';
 import { AppMaintenance } from './app-maintenance';
 import { ModelEvaluation } from './model-evaluation';
@@ -43,6 +43,7 @@ function App() {
   const [changeSource, setChangeSource] = useState<'run' | 'git'>('run');
   const [runId, setRunId] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [continuationOpen, setContinuationOpen] = useState(false);
   const [removingProject, setRemovingProject] = useState<Project>();
   const [tab, setTab] = useState<'changes' | 'terminal'>('changes');
   const [selectedFile, setSelectedFile] = useState('');
@@ -144,7 +145,7 @@ function App() {
     expanded.current = new Set(view.scroll.expanded);
     expandedGroups.current.clear();
     setProjectId(view.projectId); setTaskId(view.taskId); setPrompt(view.prompt); setMode(view.mode); setModel(view.model ?? ''); setModelValidation(undefined); setReferences(view.references); setGitReview(view.gitReview);
-    setRunId(view.runId); setTab(view.tab); setPicker(undefined); setSelectedFile(''); setError('');
+    setContinuationOpen(false); setRunId(view.runId); setTab(view.tab); setPicker(undefined); setSelectedFile(''); setError('');
     setViewRevision(value => value + 1);
   }
   useEffect(() => {
@@ -262,13 +263,7 @@ function App() {
           <TimelineRows events={history.events} busy={isBusy} runId={task.currentRunId} waiting={task.status === 'waiting'} viewport={conversation} position={pendingPosition.current} expanded={expanded} following={() => followLatest.current} corrected={top => { restoredTop.current = top; previousScrollTop.current = top; }}/>
           {history.hasLater && <div className="history-pagination"><button className="outline" disabled={history.loading} onClick={() => { pauseFollowing(); void history.loadLater(); }}>加载较新记录</button><button className="outline" disabled={history.loading} onClick={() => void returnToLatest()}>回到最新</button></div>}
           {!history.hasLater && task.currentRunId && <StreamingReply key={`${task.id}:${task.currentRunId}`} api={api} taskId={task.id} runId={task.currentRunId} initial={task.stream} onContent={() => { if (followLatest.current && !pendingPosition.current) scrollToLatest(false); }}/>}
-          <RecoveryPanel task={task} disabled={sending || composerLocked || isBusy} resume={() => {
-            const latest = task.runs?.find(r => r.id === task.currentRunId) || task.runs?.at(-1);
-            setMode(latest?.mode || task.mode || 'execute');
-            setRunId(latest?.reviewRunId || latest?.id || '');
-            setPrompt(old => old.trim() ? old : recoveryPrompt(task));
-            document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus();
-          }} inspect={() => { setTab('changes'); setRunId(task.currentRunId || ''); }} settings={() => setSettingsOpen(true)}/>
+          <RecoveryPanel task={task} disabled={sending || composerLocked || isBusy} resume={() => setContinuationOpen(true)} inspect={() => { setTab('changes'); setRunId(task.currentRunId || ''); }} settings={() => setSettingsOpen(true)}/>
           {task.legacy && <p className="inspector-note">历史数据，缺少轮次核验。</p>}
           {run && !busyStatuses.includes(run.status) && <><RunResult run={run}/><PlanActions key={run.id} run={run} load={() => api.planText(task.id, run.id)} disabled={sending || projectBusy || detail.loading || !!task.archivedAt} execute={() => void submit(run.id)}/></>}
 
@@ -282,6 +277,7 @@ function App() {
         {!!task?.followups?.length && <div className="followup-list">{task.followups.map(value => <div key={value.id}><span>{value.kind === 'steer' ? '等待当前任务接收' : '等待下一轮'}：{value.prompt}</span>{!isBusy && <button disabled={sending} onClick={() => api.runFollowup(task.id, value.id).catch(fail)}>发送这条</button>}{(value.kind === 'queue' || !isBusy) && <button onClick={() => api.cancelFollowup(task.id, value.id).catch(fail)}>取消</button>}</div>)}</div>}
         {task && <TaskProgress task={task}/>}
         <ContextMeter usage={run?.contextUsage}/>
+        {task && !isBusy && <button className="continuation-action" disabled={sending || composerLocked || !!task.archivedAt || !!evaluating || !task.currentRunId} onClick={() => setContinuationOpen(true)}>从最新轮次整理上下文并续接</button>}
         {task?.approval && <div className="approval"><div><ShieldCheck size={17}/><strong>需要确认终端命令</strong><span>{task.approval.timeout}s 超时</span></div><pre>{task.approval.command}</pre><small>工作目录：{task.approval.cwd}<br/>命令以你的系统用户权限运行。</small><footer><button onClick={() => api.approve(task.id, task.approval!.id, false).catch(fail)}>拒绝</button><button className="primary" onClick={() => api.approve(task.id, task.approval!.id, true).catch(fail)}>允许执行<ArrowRight size={14}/></button></footer></div>}
         <div className="mode-controls"><label>任务模式 <select aria-label="任务模式" value={mode} disabled={sending || composerLocked || isBusy} onChange={e => { setMode(e.target.value as Mode); setGitReview(undefined); }}>{Object.entries(modeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button disabled={!project || sending || referencePending || isBusy || composerLocked || references.length >= 8} onClick={() => setPicker({})}>@ 引用文件</button><small>{mode === 'execute' ? '项目内自动写入，支持安全回退' : mode === 'plan' ? '只读分析，确认计划后执行' : reviewTarget ? `只读审查 Git 差异：${reviewTarget.path}` : '只审查右侧选定轮次，禁止自动修复'}</small>{reviewTarget && <button onClick={() => { setGitReview(undefined); setMode('execute'); }} disabled={sending || isBusy}>取消 Git 审查</button>}</div>
         {!!references.length && <div className="reference-chips">{references.map((r, i) => <span className={r.projectId !== projectId ? 'invalid' : ''} key={i} title={`${state.projects.find(p => p.id === r.projectId)?.path}/${r.path}`}><button disabled={r.projectId !== projectId || sending} onClick={() => setPicker({ path: r.path })}><FileCode2 size={13}/><span className="reference-name">{referenceName(r.path)}</span>{r.scope === 'file' ? ' · 整个文件' : `:${r.startLine}–${r.endLine}`}{r.projectId !== projectId ? '（项目已切换，引用失效）' : ''}</button><button disabled={sending} aria-label="移除引用" onClick={() => setReferences(references.filter((_, j) => j !== i))}>×</button></span>)}</div>}
@@ -298,6 +294,7 @@ function App() {
     </aside>
     {error && <div className="toast" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={() => setError('')}><X size={16}/></button></div>}
     {picker && project && <FilePicker key={project.id} project={project} initialPath={picker.path} initialLine={picker.line} initialReference={references.find(r=>r.projectId===project.id && r.path===picker.path)} close={() => setPicker(undefined)} choose={ref => { setReferences(old => [...old.filter(r => !(r.projectId === ref.projectId && r.path === ref.path)), ref].slice(0, 8)); setPicker(undefined); }}/>}
+    {continuationOpen && task && <ContinuationDialog key={task.id} api={api} taskId={task.id} extraGoal={prompt} model={effectiveModel} close={() => setContinuationOpen(false)} resumed={() => { setContinuationOpen(false); setPrompt(''); setReferences([]); setGitReview(undefined); setRunId(''); setMode(task.mode || 'execute'); }}/>}
     {settingsOpen && <SettingsDialog state={state} close={() => setSettingsOpen(false)} fail={fail}/>}
     {removingProject && <RemoveProjectDialog project={removingProject} close={() => setRemovingProject(undefined)} fail={fail} removed={() => {
       if (removingProject.id === projectId) { const remaining={...state,projects:state.projects.filter(p=>p.id!==projectId)};openView(restoreView(sessions.current,remaining,{projectId:'',taskId:''})); }

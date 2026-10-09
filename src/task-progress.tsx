@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import type { Task, TaskDetail } from '../shared/types';
+import { stopLabels } from '../shared/continuation';
 import { busyStatuses } from '../shared/types';
 import { phaseLabels, recoverySummary } from '../shared/progress';
 const duration = (ms: number) => { const seconds = Math.max(0, Math.floor(ms / 1000)); return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`; };
@@ -19,11 +20,11 @@ export function RecoveryPanel({ task, disabled, resume, inspect, settings }: { t
   if (!['failed','cancelled','interrupted'].includes(task.status)) return null;
   const { run, written, uncertain, hint } = recoverySummary(task);
   return <section className="task-error recovery-panel"><strong>{task.status === 'failed' ? '本轮执行失败' : task.status === 'cancelled' ? '本轮已停止' : '本轮已中断'}</strong>
-    {task.error && <p>{task.error}</p>}
+    {run?.stopReason && <p>{stopLabels[run.stopReason]}</p>}{task.error && <p>{task.error}</p>}
     {run?.progress && <p>最后阶段：{phaseLabels[run.progress.phase]} · 持续 {duration((run.progress.endedAt || run.endedAt || run.progress.since) - run.progress.since)}</p>}
     <p>{run ? written.length ? `本轮已写入并保留：${written.join('、')}` : '本轮没有已核验且仍保留的文件工具修改。' : '历史记录缺少轮次核验，请检查当前文件状态。'}</p>
     {!!uncertain.length && <p>写入状态待核对：{uncertain.join('、')}。请先查看磁盘原文。</p>}
     <p>{hint}</p><small>终端命令可能产生额外影响，请一并检查输出。继续会创建新轮次，先核对当前文件；不会自动重放历史命令。</small>
-    <footer><button disabled={disabled} onClick={resume}>补充要求并继续</button><button onClick={inspect}>查看本轮差异</button><button onClick={settings}>模型与设置</button></footer>
+    <footer><button disabled={disabled} onClick={resume}>查看摘要并续接</button><button onClick={inspect}>查看本轮差异</button><button onClick={settings}>模型与设置</button></footer>
   </section>;
 }

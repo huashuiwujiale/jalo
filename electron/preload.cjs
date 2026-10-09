@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('localCode', Object.freeze({
   planText: (taskId, runId) => ipcRenderer.invoke('runs:plan', { taskId, runId }),
   gitStatus: projectId => ipcRenderer.invoke('git:status', projectId),
   gitPatch: input => ipcRenderer.invoke('git:patch', input),
+  continuationPreview: taskId => ipcRenderer.invoke('task:continuation', taskId),
+  resumeTask: input => ipcRenderer.invoke('task:resume', input),
   commandOutput: input => ipcRenderer.invoke('command:output', input),
   changePatch: input => ipcRenderer.invoke('changes:patch', input),
   saveSettings: settings => ipcRenderer.invoke('settings:save', settings),

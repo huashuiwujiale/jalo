@@ -2,6 +2,7 @@ import type { Approval, EngineEvent, Settings } from '../shared/types';
 import { MessagePatchSender, type WorkerInput } from '../shared/worker-wire';
 import { LMStudioProvider } from './provider';
 import { ToolRegistry } from './tools';
+import { validateContinuationFiles } from './continuation';
 import { gitPatch } from './git-review';
 import { captureReferences } from './project-files';
 import { TaskRunner } from './runner';
@@ -51,6 +52,7 @@ port.on('message', async ({ data }: any) => {
     emit({ type: 'progress', progress: { phase: 'preparing', since: Date.now() } });
     await captureReferences({ id: input.projectId, name: '', path: root }, run.references);
     if (run.gitReview) await gitPatch(root, run.gitReview.path, run.gitReview.version);
+    if (run.continuationFiles) await validateContinuationFiles(root, run.continuationFiles);
     const provider = new LMStudioProvider(settings);
     emit({ type: 'progress', progress: { phase: 'connecting', since: Date.now() } });
     const models = await provider.list(controller.signal);

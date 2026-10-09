@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { captureContinuation } from '../engine/continuation';
 import { metrics } from './performance';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -67,13 +68,15 @@ export class Store {
         if (!task.runs?.length && !task.legacy) { task.legacy = true; changed = true; }
         for (const run of task.runs || []) {
           for (const command of run.commands || []) if (command.status === 'running') { command.status = 'interrupted'; command.endedAt = Date.now(); changed = true; }
-          if (busyStatuses.includes(run.status)) { run.status = 'interrupted'; run.endedAt = Date.now(); changed = true; }
+          if (busyStatuses.includes(run.status)) { run.status = 'interrupted'; run.stopReason = 'interrupted'; run.endedAt = Date.now(); changed = true; }
           if (run.progress && !busyStatuses.includes(run.status) && !run.progress.endedAt) { run.progress.endedAt = run.endedAt || Date.now(); changed = true; }
           for (const change of run.changes) if (change.state === 'prepared') { change.state = 'uncertain'; changed = true; }
         }
         if (busyStatuses.includes(task.status)) {
           task.status = 'interrupted'; task.approval = undefined; task.error = '应用退出时任务未完成。请查看已产生的修改，补充指令后手动继续。'; changed = true;
         }
+        const latest = task.runs?.find(r => r.id === task.currentRunId);
+        if (changed && latest?.status === 'interrupted') latest.handoff = captureContinuation(task, latest, 'interrupted');
         if (changed) { store.enqueue(task); store.writeTasks(); store.pending.clear(); }
       }
       if (revision < 7) db.exec('PRAGMA user_version = 7');
@@ -240,7 +243,7 @@ export class Store {
     return { heads, savedRuns };
   }
   private writeCatalog(task: Task, changedRuns?: Set<string>) {
-    const { messages, events, runs, changes, eventCount, userRequests, ...data } = task;
+    const { messages, events, runs, changes, contextStart, eventCount, userRequests, ...data } = task;
     const views = (runs || []).map(run => {
       let view = this.runViews.get(run);
       if (!view || !changedRuns || changedRuns.has(run.id)) { view = runView(run); this.runViews.set(run, view); }

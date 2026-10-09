@@ -32,8 +32,8 @@ export interface GitFile { path: string; originalPath?: string; index: string; w
 export interface GitStatus { available: boolean; files: GitFile[]; truncated: boolean }
 export interface GitPatch { path: string; version: string; patch: string; truncated: boolean; deleted: boolean }
 export interface GitReview { path: string; version: string }
-export interface Run { gitReview?: GitReview & { patch: string }; commands?: CommandSession[]; id: string; taskId: string; mode: Mode; model?: string; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planText?: string; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
-export interface SubmitInput { gitReview?: GitReview; projectId: string; prompt: string; taskId?: string; model?: string; mode?: Mode; references?: FileReference[]; planRunId?: string; reviewRunId?: string }
+export interface Run { stopReason?: import('./continuation').StopReason; handoff?: import('./continuation').ContinuationCheckpoint; continuation?: import('./continuation').ContinuationLink; gitReview?: GitReview & { patch: string }; commands?: CommandSession[]; id: string; taskId: string; mode: Mode; model?: string; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planText?: string; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
+export interface SubmitInput { continuation?: { runId: string; version: string }; gitReview?: GitReview; projectId: string; prompt: string; taskId?: string; model?: string; mode?: Mode; references?: FileReference[]; planRunId?: string; reviewRunId?: string }
 export interface RollbackPreview { token: string; patch: string; path: string; createsRecoveryCopy: boolean }
 export interface Change { path: string; before: string | null; after: string; patch: string }
 export interface Approval { id: string; command: string; cwd: string; timeout: number }
@@ -46,6 +46,7 @@ export type EventCursor =
 export interface RunEvidence { successfulTools: string[]; changedFiles: string[] }
 export interface Followup { gitReview?: GitReview; id: string; prompt: string; kind: 'queue' | 'steer'; createdAt: number; model: string; mode: Mode; reviewRunId?: string }
 export interface Task {
+  contextStart?: number;
   followups?: Followup[];
   archivedAt?: number;
   eventCount?: number; historyIncomplete?: boolean; userRequests?: string[];
@@ -59,10 +60,10 @@ export interface TaskQuery { projectId?: string; archived?: boolean; query?: str
 export interface TaskPage { tasks: TaskSummary[]; next?: { createdAt: number; id: string }; counts: [number, number] }
 export interface ChangeView { path: string; changed: boolean; patchVersion: string }
 export interface RunChangeView extends ChangeView, Pick<RunChange, 'id' | 'runId' | 'state' | 'check' | 'revertedAt'> {}
-export interface RunView extends Omit<Run, 'references' | 'changes' | 'planText' | 'gitReview'> { gitReview?: GitReview; references: FileReference[]; changes: RunChangeView[]; hasPlan: boolean }
+export interface RunView extends Omit<Run, 'references' | 'changes' | 'planText' | 'gitReview' | 'handoff' | 'continuation'> { hasHandoff?: boolean; continuation?: { runId: string }; gitReview?: GitReview; references: FileReference[]; changes: RunChangeView[]; hasPlan: boolean }
 export interface StreamState { taskId: string; runId: string; version: number; text: string; ended: boolean }
 export interface StreamFrame extends Omit<StreamState, 'ended'> { kind: 'reset' | 'append' | 'end'; offset: number }
-export interface TaskDetail extends Omit<Task, 'messages' | 'runs' | 'changes'> { revision: number; runs: RunView[]; changes: ChangeView[]; stream?: StreamState }
+export interface TaskDetail extends Omit<Task, 'messages' | 'runs' | 'changes' | 'contextStart'> { revision: number; runs: RunView[]; changes: ChangeView[]; stream?: StreamState }
 export interface Snapshot { sequence: number; catalogVersion?: number; projects: Project[]; tasks: TaskSummary[]; settings: Settings; activeId?: string; evaluations?: import('./evaluation').EvaluationReport[] }
 export interface AppUpdate extends Partial<Pick<Snapshot, 'projects' | 'settings' | 'evaluations' | 'catalogVersion'>> { sequence: number; tasks: TaskSummary[]; activeId?: string }
 export interface AppInfo {
@@ -84,7 +85,7 @@ export type EngineEvent = (
   | { type: 'change'; change: Change; checkpoint?: RunChange }
   | { type: 'approval'; approval: Approval }
   | { type: 'approval-resolved' }
-  | { type: 'done'; status: Status; error?: string; evidence?: RunEvidence; result?: string }) & { runId?: string };
+  | { type: 'done'; status: Status; stopReason?: import('./continuation').StopReason; error?: string; evidence?: RunEvidence; result?: string }) & { runId?: string };
 export interface Api {
   loadSession(): Promise<{ state: import('./session').SessionState; warning?: string }>;
   saveView(view: import('./session').SessionView): Promise<void>;
@@ -109,6 +110,8 @@ export interface Api {
   planText(taskId: string, runId: string): Promise<string>;
   gitStatus(projectId: string): Promise<GitStatus>;
   gitPatch(input: { projectId: string; path: string }): Promise<GitPatch>;
+  continuationPreview(taskId: string): Promise<import('./continuation').ContinuationPreview>;
+  resumeTask(input: { taskId: string; runId: string; version: string; goal: string; model?: string }): Promise<string>;
   commandOutput(input: { taskId: string; runId: string; commandId: string; offset?: number }): Promise<CommandOutputPage>;
   changePatch(input: { taskId: string; runId?: string; path: string }): Promise<{ patch: string; version: string }>;
   saveSettings(settings: Settings): Promise<void>;

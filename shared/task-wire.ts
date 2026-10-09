@@ -13,8 +13,8 @@ export function changeView(change: Change): ChangeView {
   return { path: change.path, changed: change.before !== change.after, patchVersion: cached.version };
 }
 export function runView(run: Run): RunView {
-  const { references, changes, planText, gitReview, ...data } = run;
-  return { ...data, references: references.map(({ content, ...reference }) => reference),
+  const { references, changes, planText, gitReview, handoff, continuation, ...data } = run;
+  return { ...data, ...(handoff ? { hasHandoff: true } : {}), ...(continuation ? { continuation: { runId: continuation.runId } } : {}), references: references.map(({ content, ...reference }) => reference),
     changes: changes.map(change => ({ ...changeView(change), id: change.id, runId: change.runId, state: change.state, check: change.check, revertedAt: change.revertedAt })),
     ...(gitReview ? { gitReview: { path: gitReview.path, version: gitReview.version } } : {}), hasPlan: !!planText?.trim() };
 }
@@ -37,6 +37,6 @@ export function taskSummary(task: Task, revision: number): TaskSummary {
     revision, eventCount: task.events.length, changeCount: task.changes.length, runIds: task.runs?.map(run => run.id) || [], requestCount: requestTexts(task).size };
 }
 export function taskDetail(task: Task, revision: number, stream?: StreamState): TaskDetail {
-  const { messages, events, runs, changes, ...data } = task;
+  const { messages, events, runs, changes, contextStart, ...data } = task;
   return { ...data, revision, events: pageTaskEvents(task).events, eventCount: events.length, runs: (runs || []).map(runView), changes: changes.map(changeView), stream };
 }

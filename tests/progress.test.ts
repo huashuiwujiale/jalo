@@ -18,7 +18,7 @@ test('recovery shows current run evidence only and preserves original mode and r
   assert.deepEqual(summary.written,['kept.vue']);assert.deepEqual(summary.uncertain,['uncertain.vue']);
   assert.equal(summary.run?.mode,'plan');assert.match(recoveryPrompt(t),/新要求/);assert.match(recoveryPrompt(t),/不要直接重放/);
   const html = renderToStaticMarkup(React.createElement(RecoveryPanel,{task:t,disabled:false,resume:()=>{},inspect:()=>{},settings:()=>{}}));
-  assert.match(html,/kept.vue/);assert.match(html,/uncertain.vue/);assert.doesNotMatch(html,/old.vue|reverted.vue/);assert.match(html,/补充要求并继续/);
+  assert.match(html,/kept.vue/);assert.match(html,/uncertain.vue/);assert.doesNotMatch(html,/old.vue|reverted.vue/);assert.match(html,/查看摘要并续接/);
   assert.match(recoveryHint('无法连接 LM Studio'),/服务是否启动/);
   assert.match(recoveryHint('候选语法检查失败'),/当前原文/);
 });

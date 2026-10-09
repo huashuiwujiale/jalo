@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { EngineEvent, Message, Settings, Task, Progress, Followup } from '../shared/types';
+import type { EngineEvent, Message, Settings, Task, Progress, Followup, Mode } from '../shared/types';
 import type { Completion, ModelProvider, ToolDefinition } from './provider';
 import { definitions, EditMatchError, ToolRegistry } from './tools';
-import { compactContext, contextUsage } from './context';
+import { compactContext, contextUsage, ContextBudgetError } from './context';
 import { modelMessages } from '../shared/context';
 import { unsupportedCompletion } from './completion';
 
@@ -19,6 +19,8 @@ edit_file 的 oldText 是精确原文，不是正则表达式，不得添加正�
 仅使用文件工具进行代码修改，以确保修改记录可追踪。不要用终端命令修改源文件。
 show_changes 的差异范围以当前模式和捕获目标为准，不能据此推断其他 Git 改动。`;
 const probe: ToolDefinition = { type: 'function', function: { name: 'capability_check', description: '验证工具调用结构，必须传入 ok=true，不执行系统操作。', parameters: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } } };
+export const runnerPrompt = (mode: Mode) => systemPrompt + '\n' + (mode === 'plan' ? '当前为计划模式，只能读取、搜索和查看差异。输出目标文件、实施步骤、验收条件，等待用户按计划执行。不能声称已修改。' : mode === 'review' ? '当前为审查模式，只审查本轮提供的实际差异，给出有文件和行号依据的问题。禁止自动修复或运行命令。' : '当前为执行模式。修改后要重新读取核验，语法通过不等于业务验收完成。');
+class RunLimitError extends Error { constructor(public reason: 'steps' | 'output', message: string) { super(message); } }
 export class TaskRunner {
   constructor(private provider: ModelProvider, private tools: ToolRegistry, private settings: Settings, private emit: (event: EngineEvent) => void, private signal: AbortSignal, private takeFollowups: () => Followup[] = () => []) {}
   private notice(text: string) { this.emit({ type: 'event', event: { id: randomUUID(), at: Date.now(), kind: 'notice', text } }); }
@@ -34,7 +36,6 @@ export class TaskRunner {
       this.notice('补充要求已接收，接下来按最新要求继续。');
       return true;
     };
-    const modePrompt = this.tools.mode() === 'plan' ? '当前为计划模式，只能读取、搜索和查看差异。输出目标文件、实施步骤、验收条件，等待用户按计划执行。不能声称已修改。' : this.tools.mode() === 'review' ? '当前为审查模式，只审查本轮提供的实际差异，给出有文件和行号依据的问题。禁止自动修复或运行命令。' : '当前为执行模式。修改后要重新读取核验，语法通过不等于业务验收完成。';
     const editFailures = new Map<string, number>();
     let emptyRetries = 0;
     let evidenceRetries = 0;
@@ -58,7 +59,7 @@ export class TaskRunner {
       this.progress('preparing');
       await this.tools.init();
       const instructions = await this.tools.projectInstructions();
-      messages = [{ role: 'system', content: systemPrompt + '\n' + modePrompt + '\n\n' + instructions }, ...task.messages.filter(m => m.role !== 'system')];
+      messages = [{ role: 'system', content: runnerPrompt(this.tools.mode()) + '\n\n' + instructions }, ...task.messages.filter(m => m.role !== 'system')];
       this.emit({ type: 'messages', messages });
       if (checkCapability) {
         this.progress('probing');
@@ -82,7 +83,7 @@ export class TaskRunner {
           const activity = () => { if (!generating) { generating = true; this.progress('generating', step + 1); } };
           completion = await this.provider.generate(messages, definitions, this.signal, text => { activity(); this.emit({ type: 'delta', text }); }, undefined, activity);
           this.signal.throwIfAborted();
-          if (completion.finishReason === 'length') throw new Error('模型输出达到上限，本轮工具未执行。请增大最大输出或缩小任务后继续。');
+          if (completion.finishReason === 'length') throw new RunLimitError('output', '模型输出达到上限，本轮工具未执行。请增大最大输出或缩小任务后继续。');
           if (!['stop', 'tool_calls'].includes(completion.finishReason)) throw new Error(`模型未正常完成本轮响应：${completion.finishReason}`);
           if (completion.message.tool_calls?.length || completion.message.content?.trim()) break;
           const reason = completion.reasoningCharacters ? '只返回了思考内容，没有最终回复或结构化工具调用' : '没有返回正文或结构化工具调用';
@@ -118,7 +119,7 @@ export class TaskRunner {
           const evidence = this.tools.evidence();
           this.notice(evidence.changedFiles.length ? `本轮文件工具实际修改 ${evidence.changedFiles.length} 个文件：${evidence.changedFiles.join('、')}。请检查差异确认结果。` : '本轮回复已结束，文件工具未产生实际修改。');
           this.emit({ type: 'messages', messages });
-          this.emit({ type: 'done', status: 'completed', evidence, result: assistant.content || '' }); return;
+          this.emit({ type: 'done', status: 'completed', stopReason: 'completed', evidence, result: assistant.content || '' }); return;
         }
         let haltReason: string | undefined;
         for (const call of calls) {
@@ -162,10 +163,10 @@ export class TaskRunner {
         if (!haltReason) applyFollowups([...steering, ...this.takeFollowups()]);
         if (haltReason) throw new Error(haltReason);
       }
-      throw new Error('已达到执行步骤上限。请检查当前结果，再补充指令继续任务。');
+      throw new RunLimitError('steps', '已达到执行步骤上限。请检查当前结果，再补充指令继续任务。');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.emit({ type: 'done', status: this.signal.aborted ? 'cancelled' : 'failed', error: this.signal.aborted ? undefined : message, evidence: this.tools.evidence() });
+      this.emit({ type: 'done', status: this.signal.aborted ? 'cancelled' : 'failed', error: this.signal.aborted ? undefined : message, stopReason: this.signal.aborted ? 'cancelled' : error instanceof ContextBudgetError ? 'context' : error instanceof RunLimitError ? error.reason : 'error', evidence: this.tools.evidence() });
     }
   }
 }

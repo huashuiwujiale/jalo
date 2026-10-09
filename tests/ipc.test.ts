@@ -375,10 +375,10 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await invoke('task:followup',{taskId:followTask,prompt:'这是自动开始的下一轮',kind:'queue'});
     followWorker.emit('message',{type:'done',status:'completed',runId:followRun,result:'计划完成'});
     for(let i=0;i<50&&workers.at(-1)===followWorker;i++)await new Promise(r=>setTimeout(r,5));
-    const continued=await invoke('task:detail',followTask);assert.notEqual(continued.currentRunId,followRun);assert.equal(continued.runs.at(-1).input,'这是自动开始的下一轮');assert.equal(continued.followups.length,0);
+    const resumedContext=await invoke('task:detail',followTask);assert.notEqual(resumedContext.currentRunId,followRun);assert.equal(resumedContext.runs.at(-1).input,'这是自动开始的下一轮');assert.equal(resumedContext.followups.length,0);
     await invoke('task:followup',{taskId:followTask,prompt:'停止后保留，不自动运行',kind:'queue'});
     const stopWorker=workers.at(-1), countBeforeStop=workers.length;
-    await invoke('task:stop',followTask);stopWorker.emit('message',{type:'done',status:'completed',runId:continued.currentRunId});
+    await invoke('task:stop',followTask);stopWorker.emit('message',{type:'done',status:'completed',runId:resumedContext.currentRunId});
     await new Promise(r=>setTimeout(r,20));assert.equal(workers.length,countBeforeStop);assert.equal((await invoke('task:detail',followTask)).status,'cancelled');assert.equal((await invoke('task:detail',followTask)).followups.length,1);
 
 
@@ -414,6 +414,24 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal(legacyTask.model,'mock');assert.equal(legacyTask.runs.at(-1).model,'mock');
     const legacyWorker=workers.at(-1);await new Promise(r=>setImmediate(r));
     legacyWorker.emit('message',{type:'done',runId:legacyTask.currentRunId,status:'completed'});
+    const resumeId=await invoke('task:submit',{projectId:project.id,prompt:'保留文件，只检查现状',mode:'plan'});
+    const resumeWorker=workers.at(-1), resumeRun=(await invoke('task:detail',resumeId)).currentRunId;
+    await assert.rejects(invoke('task:continuation',resumeId),/停止或完成/);
+    resumeWorker.emit('message',{type:'done',runId:resumeRun,status:'failed',stopReason:'steps',error:'达到执行步骤上限'});
+    const prepared=await invoke('task:continuation',resumeId);assert.equal(prepared.checkpoint.reason,'steps');assert.match(prepared.goal,/保留文件/);
+    await assert.rejects(invoke('task:resume',{taskId:resumeId,runId:resumeRun,version:'a'.repeat(64),goal:prepared.goal}),/摘要或文件已变化/);
+    await assert.rejects(invoke('task:submit',{taskId:resumeId,projectId:project.id,prompt:prepared.goal,mode:'execute',continuation:{runId:resumeRun,version:prepared.version}}),/续接目标已变化/);
+    const historyBefore=(await invoke('task:detail',resumeId)).eventCount;
+    await invoke('task:resume',{taskId:resumeId,runId:resumeRun,version:prepared.version,goal:'保留文件，只分析未完成部分，不要编译',model:'resume-model'});
+    await new Promise(resolve=>setImmediate(resolve));
+    const continued=await invoke('task:detail',resumeId), continuedWorker=workers.at(-1), continuedInput=continuedWorker.sent.find((m:any)=>m.type==='start').input;
+    assert.equal(continued.runs.length,2);assert.equal(continued.runs[1].continuation.runId,resumeRun);assert.equal(continued.runs[1].mode,'plan');assert.equal(continued.model,'resume-model');
+    assert.ok(continued.eventCount>historyBefore);assert.equal(continuedInput.messages.length,1);assert.match(continuedInput.messages[0].content,/不得重放历史工具或命令/);assert.ok(!continuedInput.messages.some((m:any)=>m.tool_calls));
+    const continuationDb=new DatabaseSync(path.join(userData,'local-code.sqlite'),{readOnly:true});
+    const continuationRecord=JSON.parse(String(continuationDb.prepare('SELECT data FROM tasks WHERE id=?').get(resumeId)!.data));continuationDb.close();
+    assert.ok(continuationRecord.contextStart>0);assert.match(continuationRecord.messages[0].content,/保留文件，只检查现状/);
+    continuedWorker.emit('message',{type:'done',runId:continued.currentRunId,status:'completed'});
+    await assert.rejects(invoke('task:resume',{taskId:resumeId,runId:resumeRun,version:prepared.version,goal:'stale'}),/续接目标已变化/);
     await fs.writeFile(path.join(root,'a.txt'),'review while closing');
     const closingTarget=await invoke('git:patch',{projectId:project.id,path:'a.txt'}), beforeClosing=workers.length;
     const closingSubmit=invoke('task:submit',{projectId:project.id,prompt:'must not start during exit',mode:'review',gitReview:{path:'a.txt',version:closingTarget.version}});

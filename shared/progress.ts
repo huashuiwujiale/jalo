@@ -7,7 +7,7 @@ export const phaseLabels: Record<Progress['phase'], string> = {
 };
 export function recoveryHint(error = '') {
   if (/连接|HTTP 401|令牌/.test(error)) return '检查 LM Studio 服务地址、服务是否启动及访问令牌，然后继续。';
-  if (/上下文|输出达到上限|空回复|没有最终回复|没有返回正文/.test(error)) return '检查上下文和最大输出设置；历史过长时可在新任务中缩小要求后重试。';
+  if (/上下文|输出达到上限|空回复|没有最终回复|没有返回正文/.test(error)) return '检查上下文和最大输出设置；历史过长时查看续接摘要，整理目标与约束后从新上下文继续。';
   if (/模型加载|加载模型|out of memory/i.test(error)) return '在 LM Studio 中检查模型加载状态和可用内存，再继续任务。';
   if (/超时|timeout/i.test(error)) return '检查 LM Studio 是否仍在响应，必要时缩短上下文。命令超时时先核对输出和磁盘状态。';
   if (/语法|定位|匹配|外部|冲突|读取|失效/.test(error)) return '先查看当前原文和差异，补充目标位置；继续时重新读取文件，再修正修改。';
