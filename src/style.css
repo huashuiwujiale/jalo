@@ -195,3 +195,8 @@ button:disabled { cursor:not-allowed;opacity:.5; }
 .markdown-body .markdown-action-error { color:#a36552; font-size:10px; padding:0 10px; }
 .saved-plan-body { padding:14px; margin-top:10px; border:1px solid #e0e6e1; border-radius:8px; background:#f7f9f7; max-height:420px; overflow:auto; font-size:12px; }
 .streaming-reply .markdown-body > p:last-child { margin-bottom:0; }
+
+.followup-list { max-height: 120px; overflow: auto; font-size: 12px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+.followup-list>div { display:flex; align-items:center; gap:8px; padding:4px 0; }
+.followup-list span { flex:1; overflow-wrap:anywhere; white-space:pre-wrap; }
+.followup-list button { flex-shrink:0; }

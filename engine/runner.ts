@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { EngineEvent, Message, Settings, Task, Progress } from '../shared/types';
+import type { EngineEvent, Message, Settings, Task, Progress, Followup } from '../shared/types';
 import type { Completion, ModelProvider, ToolDefinition } from './provider';
 import { definitions, EditMatchError, ToolRegistry } from './tools';
 import { compactContext, contextUsage } from './context';
@@ -20,12 +20,20 @@ edit_file 的 oldText 是精确原文，不是正则表达式，不得添加正�
 工具 diff 仅记录本次任务通过文件工具产生的改动，不代表完整 Git 差异。`;
 const probe: ToolDefinition = { type: 'function', function: { name: 'capability_check', description: '验证工具调用结构，必须传入 ok=true，不执行系统操作。', parameters: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } } };
 export class TaskRunner {
-  constructor(private provider: ModelProvider, private tools: ToolRegistry, private settings: Settings, private emit: (event: EngineEvent) => void, private signal: AbortSignal) {}
+  constructor(private provider: ModelProvider, private tools: ToolRegistry, private settings: Settings, private emit: (event: EngineEvent) => void, private signal: AbortSignal, private takeFollowups: () => Followup[] = () => []) {}
   private notice(text: string) { this.emit({ type: 'event', event: { id: randomUUID(), at: Date.now(), kind: 'notice', text } }); }
   private progress(phase: Progress['phase'], step?: number, tool?: string) { this.emit({ type: 'progress', progress: { phase, since: Date.now(), step, maxSteps: this.settings.maxSteps, tool } }); }
   async run(task: Pick<Task, 'messages'>, checkCapability = true) {
     let messages: Message[] = [];
     const definitions = this.tools.toolDefinitions();
+    const applyFollowups = (values: Followup[]) => {
+      if (!values.length) return false;
+      messages.push(...values.map(value => ({ role: 'user' as const, content: value.prompt })));
+      this.emit({ type: 'messages', messages });
+      for (const value of values) this.emit({ type: 'followup-applied', id: value.id });
+      this.notice('补充要求已接收，接下来按最新要求继续。');
+      return true;
+    };
     const modePrompt = this.tools.mode() === 'plan' ? '当前为计划模式，只能读取、搜索和查看差异。输出目标文件、实施步骤、验收条件，等待用户按计划执行。不能声称已修改。' : this.tools.mode() === 'review' ? '当前为审查模式，只审查本轮提供的实际差异，给出有文件和行号依据的问题。禁止自动修复或运行命令。' : '当前为执行模式。修改后要重新读取核验，语法通过不等于业务验收完成。';
     const editFailures = new Map<string, number>();
     let emptyRetries = 0;
@@ -88,8 +96,8 @@ export class TaskRunner {
           prepareContext();
         }
         const assistant = modelMessages([completion.message])[0];
-        const calls = assistant.tool_calls || [];
-        if (!calls.length) {
+        const calls = assistant.tool_calls || [], steering = this.takeFollowups();
+        if (!calls.length && !steering.length) {
           const evidence = this.tools.evidence();
           const unsupported = unsupportedCompletion(assistant.content || '', evidence);
           if (unsupported) {
@@ -106,6 +114,7 @@ export class TaskRunner {
         if (assistant.content?.trim()) this.emit({ type: 'event', event: { id: randomUUID(), at: Date.now(), kind: 'message', role: 'assistant', text: assistant.content } });
         // Persist only complete assistant/tool groups, avoiding replay of unfinished calls after restart.
         if (!calls.length) {
+          if (applyFollowups(steering)) continue;
           const evidence = this.tools.evidence();
           this.notice(evidence.changedFiles.length ? `本轮文件工具实际修改 ${evidence.changedFiles.length} 个文件：${evidence.changedFiles.join('、')}。请检查差异确认结果。` : '本轮回复已结束，文件工具未产生实际修改。');
           this.emit({ type: 'messages', messages });
@@ -114,6 +123,8 @@ export class TaskRunner {
         let haltReason: string | undefined;
         for (const call of calls) {
           this.signal.throwIfAborted();
+          steering.push(...this.takeFollowups());
+          if (steering.length) { messages.push({ role: 'tool', tool_call_id: call.id, content: '未执行：用户补充了新要求，将重新生成下一步。' }); continue; }
           if (haltReason) {
             messages.push({ role: 'tool', tool_call_id: call.id, content: '未执行：本轮已达到编辑失败上限。' });
             continue;
@@ -148,6 +159,7 @@ export class TaskRunner {
           this.emit({ type: 'event', event: { id: randomUUID(), at: Date.now(), kind: 'tool', toolCallId: call.id, toolPhase: 'result', text: `${call.function.name} 结果\n${result.slice(0, 5000)}` } });
         }
         this.emit({ type: 'messages', messages });
+        if (!haltReason) applyFollowups([...steering, ...this.takeFollowups()]);
         if (haltReason) throw new Error(haltReason);
       }
       throw new Error('已达到执行步骤上限。请检查当前结果，再补充指令继续任务。');

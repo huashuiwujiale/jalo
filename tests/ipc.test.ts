@@ -83,6 +83,16 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await assert.rejects(invoke('task:submit',{projectId:project.id,prompt:'x',references:[{...ref,projectId:randomUUID()}]}),/其他项目/);
     const taskId=await invoke('task:submit',{projectId:project.id,prompt:'先计划',mode:'plan',references:[ref]});
     await assert.rejects(invoke('evaluation:start'),/请先停止/);
+    const queuedRequest = await invoke('task:followup',{taskId,prompt:'下一轮继续解释',kind:'queue'});
+    assert.equal((await invoke('task:detail',taskId)).followups[0].id,queuedRequest);
+    await invoke('task:followup-cancel',{taskId,id:queuedRequest});
+    const steeringRequest = await invoke('task:followup',{taskId,prompt:'保留当前计划',kind:'steer'});
+    assert.ok(workers.at(-1).sent.some((m:any)=>m.type==='steer'&&m.followup.id===steeringRequest));
+    await assert.rejects(invoke('task:followup-cancel',{taskId,id:steeringRequest}),/交接/);
+    workers.at(-1).emit('message',{type:'followup-applied',id:steeringRequest,runId:(await invoke('task:detail',taskId)).currentRunId});
+    assert.equal((await invoke('task:detail',taskId)).followups.length,0);
+    await assert.rejects(handlers.get('task:followup')!({sender:{},senderFrame:{}},{taskId,prompt:'x',kind:'queue'}),/无效的调用来源/);
+
     const snapshot=async()=>{ const summary=await invoke('app:snapshot'); return {...summary,tasks:await Promise.all(summary.tasks.map((task:any)=>invoke('task:detail',task.id)))}; };
     const firstPage=await invoke('tasks:page',{projectId:project.id,archived:false,limit:1});assert.equal(firstPage.tasks[0].id,taskId);assert.deepEqual(firstPage.counts,[1,0]);
     await assert.rejects(invoke('tasks:page',{projectId:project.id,limit:101}));
@@ -314,6 +324,17 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const gapDb=new DatabaseSync(path.join(userData,'local-code.sqlite'),{readOnly:true});
     const gapStored=JSON.parse(String(gapDb.prepare('SELECT data FROM tasks WHERE id=?').get(gapId)!.data));
     assert.equal(gapStored.messages.length,1);assert.equal(gapStored.messages[0].content,'message protocol gap');gapDb.close();
+    const followTask = await invoke('task:submit',{projectId:project.id,prompt:'完成后追加',mode:'plan'});
+    const followWorker=workers.at(-1), followRun=(await invoke('task:detail',followTask)).currentRunId;
+    await invoke('task:followup',{taskId:followTask,prompt:'这是自动开始的下一轮',kind:'queue'});
+    followWorker.emit('message',{type:'done',status:'completed',runId:followRun,result:'计划完成'});
+    for(let i=0;i<50&&workers.at(-1)===followWorker;i++)await new Promise(r=>setTimeout(r,5));
+    const continued=await invoke('task:detail',followTask);assert.notEqual(continued.currentRunId,followRun);assert.equal(continued.runs.at(-1).input,'这是自动开始的下一轮');assert.equal(continued.followups.length,0);
+    await invoke('task:followup',{taskId:followTask,prompt:'停止后保留，不自动运行',kind:'queue'});
+    const stopWorker=workers.at(-1), countBeforeStop=workers.length;
+    await invoke('task:stop',followTask);stopWorker.emit('message',{type:'done',status:'completed',runId:continued.currentRunId});
+    await new Promise(r=>setTimeout(r,20));assert.equal(workers.length,countBeforeStop);assert.equal((await invoke('task:detail',followTask)).status,'cancelled');assert.equal((await invoke('task:detail',followTask)).followups.length,1);
+
 
     // Per-chat overrides work even without a default and keep their own queued configuration.
     await invoke('settings:save',{...defaults,model:''});

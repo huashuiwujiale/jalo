@@ -55,6 +55,7 @@ let modelOperation = false, quitting = false, storageFailed = false;
 let session: SessionStore;
 let closingProjectIds: string[] = [];
 let evaluation: EvaluationController;
+let submitTask: (input: unknown, followupId?: string) => Promise<string>;
 const configs = new Map<string, Settings>();
 const projectLocks = new Set<string>();
 const rollbackTokens = new Map<string, { taskId: string; runId: string; path: string; afterVersion: string; expires: number }>();
@@ -140,7 +141,18 @@ function finish(task: Task, status: Task['status'], error?: string) {
   diagnostics.record({ event: 'task_finished', taskId: task.id, runId: task.currentRunId, status, ...(error ? { errorCategory: errorCategory(error) } : {}) });
   active = undefined; configs.delete(task.id); previous.worker.kill();
   try { persist(task); } catch { return; }
-  setImmediate(pump);
+  setImmediate(async () => {
+    if (!quitting && !storageFailed && status === 'completed' && task.followups?.length) {
+      try { await runFollowup(task.id, task.followups[0].id); } catch (error) { const latest = readTask(task.id); if (latest.followups?.length) { latest.events.push({ id: randomUUID(), at: Date.now(), kind: 'notice', text: `追加要求尚未开始：${(error as Error).message}，请手动继续。` }); try { persist(latest); } catch {} } }
+    }
+    pump();
+  });
+}
+async function runFollowup(taskId: string, id: string) {
+  const task = readTask(taskId), next = task.followups?.find(f => f.id === id);
+  if (!next) throw new Error('追加要求不存在或已生效');
+  if (busyStatuses.includes(task.status)) throw new Error('请等待当前任务结束');
+  return submitTask({ taskId, projectId: task.projectId, prompt: next.prompt, mode: next.mode, model: next.model, ...(next.reviewRunId ? { reviewRunId: next.reviewRunId } : {}) }, id);
 }
 function pump() {
   if (active || modelOperation || evaluation?.busy || quitting || storageFailed) return;
@@ -160,6 +172,11 @@ function pump() {
       if (active?.worker !== worker || quitting || event.runId !== task.currentRunId) return;
       try {
         const run = currentRun(task);
+        if (event.type === 'followup-applied') {
+          const value = task.followups?.find(f => f.id === event.id && f.kind === 'steer');
+          if (value) { task.followups = task.followups!.filter(f => f.id !== value.id); task.events.push({ id: value.id, kind: 'message', role: 'user', text: value.prompt, at: Date.now(), runId: run?.id }); persist(task); }
+          return;
+        }
         if (event.type === 'context') { if (run) { run.contextUsage = event.usage; persist(task, 'deferred'); } return; }
         if (event.type === 'progress') {
           if (run && run.progress?.phase !== 'stopping' && !task.approval) {
@@ -191,7 +208,7 @@ function pump() {
         if (event.type === 'change') { fileNameIndex.clear(project.path); if (run && event.checkpoint) { const i = run.changes.findIndex(c => c.path === event.checkpoint!.path); if (i < 0) run.changes.push(event.checkpoint); else run.changes[i] = event.checkpoint; } const index = task.changes.findIndex(c => c.path === event.change.path); if (index < 0) task.changes.push(event.change); else task.changes[index] = event.change; }
         if (event.type === 'approval') { if (run?.progress?.phase === 'stopping') return; task.approval = event.approval; task.status = 'waiting'; progress(task, 'approval'); }
         if (event.type === 'approval-resolved') { task.approval = undefined; task.status = 'running'; if (run?.progress?.phase !== 'stopping') progress(task, 'tool'); }
-        if (event.type === 'done') { if (run?.mode === 'plan' && event.status === 'completed' && event.result?.trim()) run.planText = event.result; task.lastRun = event.evidence; finish(task, event.status, event.error); return; }
+        if (event.type === 'done') { if (run?.progress?.phase === 'stopping') { finish(task, 'cancelled'); return; } if (run?.mode === 'plan' && event.status === 'completed' && event.result?.trim()) run.planText = event.result; task.lastRun = event.evidence; finish(task, event.status, event.error); return; }
         persist(task, ['change', 'approval', 'approval-resolved'].includes(event.type) ? 'immediate' : 'deferred');
       } catch (error) { storageFailure(task, error); }
     });
@@ -200,7 +217,7 @@ function pump() {
     worker.on('exit', code => { if (active?.worker === worker) { diagnostics.record({ event: 'worker_exit', taskId: task.id, runId: task.currentRunId, exitCode: code }); finish(task, 'interrupted', `任务进程意外退出（${code}）。${stderr.slice(-500)} 请检查修改后手动继续。`); } });
     worker.on('spawn', () => {
       if (active?.worker !== worker || quitting) return;
-      try { worker.postMessage({ type: 'start', input: payload.input, root: project.path, backupDir: path.join(app.getPath('userData'), 'backups', task.id), settings: configs.get(task.id) || settings() }); }
+      try { worker.postMessage({ type: 'start', input: { ...payload.input, followups: task.followups?.filter(f => f.kind === 'steer') }, root: project.path, backupDir: path.join(app.getPath('userData'), 'backups', task.id), settings: configs.get(task.id) || settings() }); }
       catch (error) { finish(task, 'failed', (error as Error).message); }
     });
     persist(task);
@@ -406,7 +423,7 @@ function registerApi() {
       persist(task, 'immediate', run.id);
     } finally { projectLocks.delete(task.projectId); releaseTasks(); }
   });
-  register('task:submit', async (raw: unknown) => {
+  submitTask = async (raw: unknown, followupId?: string) => {
     if (evaluation.busy) throw new Error('模型能力实测正在运行，请结束实测后提交任务');
     const input = submitSchema.parse(raw);
     if (projectLocks.has(input.projectId)) throw new Error('项目正在保存或回退，请稍后提交');
@@ -444,9 +461,29 @@ function registerApi() {
     task.messages.push({ role: 'user', content: input.prompt + (context ? '\n\n' + context : '') });
     task.events.push({ id: randomUUID(), at: Date.now(), kind: 'message', role: 'user', text: input.prompt, runId: run.id });
     task.model = config.model; task.status = 'queued'; task.queuedAt = Date.now(); task.error = undefined; task.approval = undefined; task.lastRun = undefined;
+    if (followupId) task.followups = task.followups?.filter(f => f.id !== followupId);
     configs.set(task.id, config); persist(task); diagnostics.record({ event: 'task_queued', taskId: task.id, runId: run.id }); pump(); return task.id;
     } finally { projectLocks.delete(input.projectId); releaseTasks(); }
+  };
+  register('task:submit', submitTask);
+  register('task:followup', (raw: unknown) => {
+    const input = z.object({ taskId: uuid, prompt: z.string().trim().min(1).max(16000), kind: z.enum(['queue','steer']) }).strict().parse(raw);
+    const task = readTask(input.taskId), run = currentRun(task);
+    if (!busyStatuses.includes(task.status) || run?.progress?.phase === 'stopping') throw new Error('当前任务已结束或正在停止，请直接发送新要求');
+    if ((task.followups?.length || 0) >= 20) throw new Error('追加要求最多保留 20 条');
+    if (input.kind === 'steer' && active?.task.id !== task.id) throw new Error('任务尚未开始，请使用排队发送');
+    const value = { id: randomUUID(), prompt: input.prompt, kind: input.kind, createdAt: Date.now(), model: task.model, mode: run?.mode || 'execute' as const, reviewRunId: run?.reviewRunId };
+    task.followups ??= []; task.followups.push(value); persist(task);
+    if (input.kind === 'steer') active!.worker.postMessage({ type: 'steer', runId: run!.id, followup: value });
+    return value.id;
   });
+  register('task:followup-cancel', (raw: unknown) => {
+    const input = z.object({ taskId: uuid, id: uuid }).strict().parse(raw), task = readTask(input.taskId), value = task.followups?.find(f => f.id === input.id);
+    if (!value) throw new Error('追加要求不存在或已生效');
+    if (value.kind === 'steer' && active?.task.id === task.id) throw new Error('当前要求正在交接，请等待生效或停止任务');
+    task.followups = task.followups!.filter(f => f.id !== input.id); persist(task);
+  });
+  register('task:followup-run', (raw: unknown) => { const input = z.object({ taskId: uuid, id: uuid }).strict().parse(raw); return runFollowup(input.taskId, input.id); });
   register('task:stop', (id: unknown) => {
     const task = readTask(uuid.parse(id));
     if (active?.task.id === task.id) {

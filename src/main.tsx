@@ -44,6 +44,7 @@ function App() {
   const [selectedFile, setSelectedFile] = useState('');
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
+  const [followupKind, setFollowupKind] = useState<'queue' | 'steer'>('queue');
   const [referencePending, setReferencePending] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [viewRevision, setViewRevision] = useState(0);
@@ -102,7 +103,7 @@ function App() {
   }, e => fail(e));
   const isBusy = !!selected && busyStatuses.includes(selected.status);
   const evaluating = state.evaluations?.some(r => r.status === 'running');
-  const composerLocked = isBusy || !!selected?.archivedAt || (!!selected && (!task || detail.loading || !!detail.error));
+  const composerLocked = !!selected?.archivedAt || (!!selected && (!task || detail.loading || !!detail.error));
   const modelService = JSON.stringify([state.settings.baseUrl, state.settings.token]);
   const effectiveModel = model || state.settings.model;
   const modelError = modelValidation?.service === modelService && modelValidation.model === effectiveModel ? modelValidation.error : '';
@@ -206,7 +207,12 @@ function App() {
   };
   const addProject = async () => { if(sending)return;setSending(true);try { const p = await api.addProject(); if (p) { const snapshot=await api.snapshot();setState(current => current.sequence > snapshot.sequence ? current : snapshot);openView(restoreView(sessions.current,snapshot,{projectId:p.id,taskId:sessions.current.projectTasks[p.id] || ''})); } } catch (e) { fail(e); } finally {setSending(false);} };
   const submit = async (planRunId?: string) => {
-    if ((!prompt.trim() && !planRunId) || sending || referencePending || isBusy) return;
+    if ((!prompt.trim() && !planRunId) || sending || referencePending) return;
+    if (isBusy && task) {
+      setSending(true); setError('');
+      try { await api.addFollowup({ taskId: task.id, prompt, kind: followupKind }); setPrompt(''); } catch (error) { fail(error); } finally { setSending(false); }
+      return;
+    }
     if (task?.archivedAt) { setError('请先恢复已归档任务，再继续对话'); return; }
     if (evaluating) { setError('模型能力实测正在运行，请先停止或完成实测'); return; }
     if (invalidReferences && !planRunId) { setError('存在其他项目的失效引用，请移除或重新选择'); return; }
@@ -251,7 +257,7 @@ function App() {
           <TimelineRows events={history.events} busy={isBusy} runId={task.currentRunId} waiting={task.status === 'waiting'} viewport={conversation} position={pendingPosition.current} expanded={expanded} following={() => followLatest.current} corrected={top => { restoredTop.current = top; previousScrollTop.current = top; }}/>
           {history.hasLater && <div className="history-pagination"><button className="outline" disabled={history.loading} onClick={() => { pauseFollowing(); void history.loadLater(); }}>加载较新记录</button><button className="outline" disabled={history.loading} onClick={() => void returnToLatest()}>回到最新</button></div>}
           {!history.hasLater && task.currentRunId && <StreamingReply key={`${task.id}:${task.currentRunId}`} api={api} taskId={task.id} runId={task.currentRunId} initial={task.stream} onContent={() => { if (followLatest.current && !pendingPosition.current) scrollToLatest(false); }}/>}
-          <RecoveryPanel task={task} disabled={sending || composerLocked} resume={() => {
+          <RecoveryPanel task={task} disabled={sending || composerLocked || isBusy} resume={() => {
             const latest = task.runs?.find(r => r.id === task.currentRunId) || task.runs?.at(-1);
             setMode(latest?.mode || task.mode || 'execute');
             setRunId(latest?.reviewRunId || latest?.id || '');
@@ -268,15 +274,16 @@ function App() {
       <div className="composer-area">
         {evaluating && <div className="archived-banner"><span>模型能力实测中，完成或停止后可提交任务。</span><button onClick={() => setSettingsOpen(true)}>查看实测</button></div>}
         {task?.archivedAt && <div className="archived-banner"><span>此任务已归档，恢复后可继续对话。</span><button onClick={() => api.archiveTask(task.id, false).catch(fail)}>恢复任务</button></div>}
+        {!!task?.followups?.length && <div className="followup-list">{task.followups.map(value => <div key={value.id}><span>{value.kind === 'steer' ? '等待当前任务接收' : '等待下一轮'}：{value.prompt}</span>{!isBusy && <button disabled={sending} onClick={() => api.runFollowup(task.id, value.id).catch(fail)}>发送这条</button>}{(value.kind === 'queue' || !isBusy) && <button onClick={() => api.cancelFollowup(task.id, value.id).catch(fail)}>取消</button>}</div>)}</div>}
         {task && <TaskProgress task={task}/>}
         <ContextMeter usage={run?.contextUsage}/>
         {task?.approval && <div className="approval"><div><ShieldCheck size={17}/><strong>需要确认终端命令</strong><span>{task.approval.timeout}s 超时</span></div><pre>{task.approval.command}</pre><small>工作目录：{task.approval.cwd}<br/>命令以你的系统用户权限运行。</small><footer><button onClick={() => api.approve(task.id, task.approval!.id, false).catch(fail)}>拒绝</button><button className="primary" onClick={() => api.approve(task.id, task.approval!.id, true).catch(fail)}>允许执行<ArrowRight size={14}/></button></footer></div>}
-        <div className="mode-controls"><label>任务模式 <select aria-label="任务模式" value={mode} disabled={sending || composerLocked} onChange={e => setMode(e.target.value as Mode)}>{Object.entries(modeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button disabled={!project || sending || referencePending || composerLocked || references.length >= 8} onClick={() => setPicker({})}>@ 引用文件</button><small>{mode === 'execute' ? '项目内自动写入，支持安全回退' : mode === 'plan' ? '只读分析，确认计划后执行' : '只审查右侧选定轮次，禁止自动修复'}</small></div>
+        <div className="mode-controls"><label>任务模式 <select aria-label="任务模式" value={mode} disabled={sending || composerLocked || isBusy} onChange={e => setMode(e.target.value as Mode)}>{Object.entries(modeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button disabled={!project || sending || referencePending || isBusy || composerLocked || references.length >= 8} onClick={() => setPicker({})}>@ 引用文件</button><small>{mode === 'execute' ? '项目内自动写入，支持安全回退' : mode === 'plan' ? '只读分析，确认计划后执行' : '只审查右侧选定轮次，禁止自动修复'}</small></div>
         {!!references.length && <div className="reference-chips">{references.map((r, i) => <span className={r.projectId !== projectId ? 'invalid' : ''} key={i} title={`${state.projects.find(p => p.id === r.projectId)?.path}/${r.path}`}><button disabled={r.projectId !== projectId || sending} onClick={() => setPicker({ path: r.path })}><FileCode2 size={13}/><span className="reference-name">{referenceName(r.path)}</span>{r.scope === 'file' ? ' · 整个文件' : `:${r.startLine}–${r.endLine}`}{r.projectId !== projectId ? '（项目已切换，引用失效）' : ''}</button><button disabled={sending} aria-label="移除引用" onClick={() => setReferences(references.filter((_, j) => j !== i))}>×</button></span>)}</div>}
-        <div className={`composer ${composerLocked ? 'busy' : ''}`}><MentionInput key={`${projectId}:${taskId}`} api={api} project={project} placeholder={task?.archivedAt ? '恢复任务后可继续对话' : isBusy ? '任务正在执行，可停止后继续补充要求…' : '描述任务，输入 @ 引用文件…'} value={prompt} references={references} disabled={composerLocked || sending} canAdd={references.length < 8} onChange={setPrompt} onChoose={ref=>setReferences(old=>[...old.filter(r=>!(r.projectId===ref.projectId && r.path===ref.path)),ref].slice(0,8))} onPending={setReferencePending} submit={()=>void submit()}/><div className="composer-toolbar"><label className="composer-project" title={project?.path || '选择任务所在项目'}><Folder size={13}/><select aria-label="切换任务项目" value={projectId} disabled={sending || !state.projects.length} onChange={e => chooseProject(e.target.value)}>
+        <div className={`composer ${composerLocked ? 'busy' : ''}`}><MentionInput key={`${projectId}:${taskId}`} api={api} project={project} placeholder={task?.archivedAt ? '恢复任务后可继续对话' : isBusy ? '补充文字要求：排队发送或调整当前任务…' : '描述任务，输入 @ 引用文件…'} value={prompt} references={references} disabled={composerLocked || sending} canAdd={!isBusy && references.length < 8} onChange={setPrompt} onChoose={ref=>setReferences(old=>[...old.filter(r=>!(r.projectId===ref.projectId && r.path===ref.path)),ref].slice(0,8))} onPending={setReferencePending} submit={()=>void submit()}/><div className="composer-toolbar"><label className="composer-project" title={project?.path || '选择任务所在项目'}><Folder size={13}/><select aria-label="切换任务项目" value={projectId} disabled={sending || !state.projects.length} onChange={e => chooseProject(e.target.value)}>
           {!projectId && <option value="" disabled>未选择项目</option>}
           {state.projects.map(p => <option key={p.id} value={p.id}>{state.projects.filter(other => other.name === p.name).length > 1 ? `${p.name} — ${p.path}` : p.name}</option>)}
-        </select><ChevronDown size={12}/></label><div className="composer-actions"><ModelSelector key={`${projectId}:${taskId}`} api={api} value={model} defaultModel={state.settings.model} service={modelService} disabled={sending || composerLocked || !!evaluating} onChange={setModel} onValidation={setModelValidation} settings={() => setSettingsOpen(true)}/>{isBusy ? <><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[selected!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(selected!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || referencePending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
+        </select><ChevronDown size={12}/></label><div className="composer-actions"><ModelSelector key={`${projectId}:${taskId}`} api={api} value={model} defaultModel={state.settings.model} service={modelService} disabled={sending || composerLocked || isBusy || !!evaluating} onChange={setModel} onValidation={setModelValidation} settings={() => setSettingsOpen(true)}/>{isBusy ? <><select aria-label="追加要求方式" value={followupKind} onChange={e => setFollowupKind(e.target.value as 'queue' | 'steer')}><option value="queue">排队发送</option><option value="steer" disabled={selected?.status === 'queued'}>调整当前任务</option></select><button className="send" aria-label="发送追加要求" disabled={sending || !prompt.trim()} onClick={() => void submit()}><ArrowUp size={16}/></button><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[selected!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(selected!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || referencePending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
         <div className="composer-caption"><ShieldCheck size={12}/>推理由你配置的 LM Studio 提供<span>Jalo / 开发版</span></div>
       </div>
     </main>

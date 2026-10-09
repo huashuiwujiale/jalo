@@ -4,6 +4,8 @@ import { LMStudioProvider } from './provider';
 import { ToolRegistry } from './tools';
 import { captureReferences } from './project-files';
 import { TaskRunner } from './runner';
+import { SteeringInbox } from './steering';
+const steering = new SteeringInbox();
 import { runEvaluation } from './evaluation';
 const port = (process as any).parentPort;
 if (!port) throw new Error('任务引擎必须由 Electron utilityProcess 启动');
@@ -23,6 +25,7 @@ const approve = (approval: Approval) => new Promise<boolean>(resolve => {
   pending = { id: approval.id, resolve }; emit({ type: 'approval', approval });
 });
 port.on('message', async ({ data }: any) => {
+  if (data.type === 'steer') { if (!controller.signal.aborted && runId && data.runId === runId) steering.add(data.followup); return; }
   if (data.type === 'checkpoint-ack') { const waiting = checkpoints.get(data.id); checkpoints.delete(data.id); if (data.error) waiting?.reject(new Error(data.error)); else waiting?.resolve(); return; }
   if (data.type === 'cancel') { controller.abort(); for (const c of checkpoints.values()) c.reject(new Error('任务已停止')); checkpoints.clear(); pending?.resolve(false); pending = undefined; return; }
   if (data.type === 'evaluate' && !started) {
@@ -38,6 +41,7 @@ port.on('message', async ({ data }: any) => {
   started = true;
   const { input, root, backupDir } = data as { input: WorkerInput; root: string; backupDir: string };
   runId = input?.run?.id;
+  for (const followup of input.followups || []) steering.add(followup);
   const settings: Settings = { ...data.settings };
   try {
     const run = input?.run;
@@ -62,7 +66,7 @@ port.on('message', async ({ data }: any) => {
     }
     if (settings.maxTokens >= settings.contextLength / 2) throw new Error('已加载模型的上下文过小，请卸载后使用更大上下文重新加载，或降低最大输出');
     const registry = new ToolRegistry({ root, backupDir, signal: controller.signal, timeout: settings.commandTimeout, emit, approve, changes: input.changes, mode: run.mode, runId, reviewChanges: input.reviewChanges, checkpoint: change => new Promise<void>((resolve, reject) => { checkpoints.set(change.id, { resolve, reject }); emit({ type: 'checkpoint', checkpoint: change }); }) });
-    await new TaskRunner(provider, registry, settings, emit, controller.signal).run({ messages: input.messages });
+    await new TaskRunner(provider, registry, settings, emit, controller.signal, () => steering.take()).run({ messages: input.messages });
   } catch (error) {
     emit({ type: 'done', status: controller.signal.aborted ? 'cancelled' : 'failed', error: controller.signal.aborted ? undefined : (error as Error).message });
   }

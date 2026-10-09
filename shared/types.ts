@@ -38,7 +38,9 @@ export type EventCursor =
   | { before?: never; after: string; around?: never }
   | { before?: never; after?: never; around: string };
 export interface RunEvidence { successfulTools: string[]; changedFiles: string[] }
+export interface Followup { id: string; prompt: string; kind: 'queue' | 'steer'; createdAt: number; model: string; mode: Mode; reviewRunId?: string }
 export interface Task {
+  followups?: Followup[];
   archivedAt?: number;
   eventCount?: number; historyIncomplete?: boolean; userRequests?: string[];
   id: string; projectId: string; title: string; model: string; status: Status; createdAt: number; queuedAt?: number;
@@ -63,6 +65,7 @@ export interface AppInfo {
   dataDirectory: string; logDirectory: string; logsAvailable: boolean;
 }
 export type EngineEvent = (
+  | { type: 'followup-applied'; id: string }
   | { type: 'context'; usage: import('./context').ContextUsage }
   | { type: 'progress'; progress: Progress }
   | { type: 'process'; pid: number; running: boolean }
@@ -102,6 +105,9 @@ export interface Api {
   models(): Promise<LocalModel[]>;
   loadModel(key: string): Promise<void>;
   unloadModel(instance: string): Promise<void>;
+  addFollowup(input: { taskId: string; prompt: string; kind: 'queue' | 'steer' }): Promise<string>;
+  cancelFollowup(taskId: string, id: string): Promise<void>;
+  runFollowup(taskId: string, id: string): Promise<string>;
   submit(input: SubmitInput): Promise<string>;
   searchFiles(input: { projectId: string; query: string }): Promise<{ paths: string[]; truncated: boolean }>;
   listDirectory(input: { projectId: string; path: string }): Promise<{ entries: { path: string; name: string; directory: boolean }[]; truncated: boolean }>;

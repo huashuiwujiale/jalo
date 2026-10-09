@@ -1,8 +1,9 @@
-import type { Change, EngineEvent, FileReference, Message, Mode, Task } from './types';
+import type { Change, EngineEvent, FileReference, Message, Mode, Task, Followup } from './types';
 
 export interface WorkerInput {
   projectId: string; model: string;
   run: { id: string; mode: Mode; references: FileReference[] };
+  followups?: Followup[];
   messages: Message[]; changes: Change[]; reviewChanges?: Pick<Change, 'path' | 'patch'>[];
 }
 export interface MessagePatch {
@@ -16,7 +17,7 @@ export function workerInput(task: Task): { input: WorkerInput; archiveLength: nu
   if (!run) throw new Error('缺少本轮执行记录，禁止执行');
   const archiveLength = run.planRunId || run.mode === 'review' ? Math.max(0, task.messages.length - 1) : 0;
   return { archiveLength, input: {
-    projectId: task.projectId, model: task.model,
+    projectId: task.projectId, model: task.model, followups: task.followups?.filter(f => f.kind === 'steer'),
     run: { id: run.id, mode: run.mode, references: run.references.map(({ content: _content, ...reference }) => reference) },
     messages: task.messages.slice(archiveLength), changes: run.mode === 'review' ? [] : task.changes,
     ...(run.mode === 'review' ? { reviewChanges: task.runs?.find(r => r.id === run.reviewRunId)?.changes
