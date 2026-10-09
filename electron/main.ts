@@ -39,6 +39,7 @@ function appInfo(): AppInfo {
 const developmentUrl = app.isPackaged ? undefined : process.env.LOCAL_CODE_DEV_URL;
 let win: BrowserWindow | undefined, store: Store;
 let tasks: TaskSummary[] = [];
+let catalogVersion = 0;
 // Full objects live only while executing, queued, saving or held by an operation.
 const residentTasks = new Map<string, Task>();
 function readTask(id: string) {
@@ -78,15 +79,23 @@ function summary(saved: TaskSummary) {
   if (cached?.revision === revision) return cached;
   const value = taskSummary(task, revision); liveSummaries.set(task, value); return value;
 }
+function findSummary(id: string) { return tasks.find(task => task.id === id) || store.summary(id); }
 function replaceSummary(value: TaskSummary) {
   const index = tasks.findIndex(task => task.id === value.id);
+  const old = tasks[index];
+  if (!old || old.title !== value.title || old.archivedAt !== value.archivedAt || old.requestCount !== value.requestCount) catalogVersion++;
   if (index >= 0) tasks[index] = value; else tasks.unshift(value);
+  if (tasks.length > 200) { let completed = 0; tasks = tasks.filter(task => busyStatuses.includes(task.status) || completed++ < 200); }
 }
-const updates = new UpdateBatch((ids, global, sequence) => ({ sequence, tasks: tasks.filter(task => ids.includes(task.id)).map(summary), activeId: active?.task.id,
+const updates = new UpdateBatch((ids, global, sequence) => ({ sequence, catalogVersion, tasks: ids.map(id => summary(findSummary(id))), activeId: active?.task.id,
   ...(global ? { projects: store.projects(), settings: settings(), evaluations: evaluation?.reports() || [] } : {}) }),
   update => { if (win && !win.isDestroyed()) win.webContents.send('app:update', update); });
 const replies = new ReplyStream(frame => { if (win && !win.isDestroyed()) win.webContents.send('task:delta', frame); });
-function snapshot(): Snapshot { return { sequence: updates.sequence, projects: store.projects(), tasks: tasks.map(summary), settings: settings(), activeId: active?.task.id, evaluations: evaluation?.reports() || [] }; }
+function snapshot(): Snapshot {
+  const recent = store.taskPage().tasks, selected = session?.read().state.selected.taskId;
+  if (selected && !recent.some(t => t.id === selected)) { try { recent.push(findSummary(selected)); } catch {} }
+  const merged = new Map([...recent, ...tasks.filter(t => busyStatuses.includes(t.status))].map(t => [t.id, summary(t)]));
+  return { sequence: updates.sequence, catalogVersion, projects: store.projects(), tasks: [...merged.values()], settings: settings(), activeId: active?.task.id, evaluations: evaluation?.reports() || [] }; }
 function broadcast(task?: Task, immediate = true) {
   if (task) {
     const revision = (taskRevisions.get(task.id) || 0) + 1; taskRevisions.set(task.id, revision);
@@ -222,7 +231,7 @@ function registerApi() {
     const view = viewSchema.parse(raw);
     const ids = quitting ? closingProjectIds : store.projects(true).map(p=>p.id);
     if (view.projectId && !ids.includes(view.projectId)) throw new Error('草稿所属项目不存在');
-    if (view.taskId && !tasks.some(t=>t.id===view.taskId && t.projectId===view.projectId)) throw new Error('草稿所属任务与项目不匹配');
+    if (view.taskId) { try { if (findSummary(view.taskId).projectId !== view.projectId) throw new Error(); } catch { throw new Error('草稿所属任务与项目不匹配'); } }
     return view;
   };
   register('session:load', () => session.read());
@@ -254,7 +263,7 @@ function registerApi() {
       const selection = await dialog.showSaveDialog(win!, { title: '导出诊断日志', defaultPath: `Jalo-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, filters: [{ name: '诊断日志 JSON', extensions: ['json'] }] });
       if (selection.canceled || !selection.filePath) return null;
       const recent = tasks.slice(0, 50).map(task => residentTasks.get(task.id) || store.view(task.id));
-      await saveDiagnosticReport(selection.filePath, diagnosticReport(appInfo(), recent, diagnostics, tasks.length), app.getPath('userData'));
+      await saveDiagnosticReport(selection.filePath, diagnosticReport(appInfo(), recent, diagnostics, store.taskCount()), app.getPath('userData'));
       diagnostics.record({ event: 'diagnostics_exported' });
       return selection.filePath;
     } finally { exportingDiagnostics = false; }
@@ -277,14 +286,14 @@ function registerApi() {
   });
   register('task:rename', (raw: unknown) => {
     const input = z.object({ taskId: uuid, title: z.string().trim().min(1).max(100) }).strict().parse(raw);
-    const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
+    const task = findSummary(input.taskId);
     const resident = residentTasks.get(task.id);
     if (resident) { resident.title = input.title; persist(resident); }
     else { store.updateMetadata(task.id, { title: input.title }); broadcastMetadata(task.id); }
   });
   register('task:archive', (raw: unknown) => {
     const input = z.object({ taskId: uuid, archived: z.boolean() }).strict().parse(raw);
-    const task = tasks.find(t => t.id === input.taskId); if (!task) throw new Error('任务不存在');
+    const task = findSummary(input.taskId);
     if (projectLocks.has(task.projectId) || busyStatuses.includes(task.status)) throw new Error('请先停止或完成任务，再归档或恢复');
     const archivedAt = input.archived ? task.archivedAt ?? Date.now() : undefined;
     const resident = residentTasks.get(task.id);
@@ -295,12 +304,18 @@ function registerApi() {
     const id = uuid.parse(raw), task = residentTasks.get(id), revision = taskRevisions.get(id) || 0;
     return task ? taskDetail(task, revision, replies.snapshot(id)) : { ...store.detail(id, revision), stream: replies.snapshot(id) };
   });
+  register('task:summary', (raw: unknown) => summary(findSummary(uuid.parse(raw))));
+  register('tasks:page', (raw: unknown) => {
+    const input = z.object({ projectId: uuid.optional(), archived: z.boolean().optional(), query: z.string().max(100000).optional(), limit: z.number().int().min(1).max(100).optional(), cursor: z.object({ createdAt: z.number().int().nonnegative(), id: z.string().min(1).max(200) }).strict().optional() }).strict().parse(raw);
+    const page = store.taskPage(input);
+    return { ...page, tasks: page.tasks.map(summary) };
+  });
   register('tasks:search', (raw: unknown) => {
     const input = z.object({ projectId: uuid, archived: z.boolean(), query: z.string().max(100000) }).strict().parse(raw);
     const resident = [...residentTasks.values()], ids = new Set(store.search(input.projectId, input.archived, input.query));
     for (const task of resident) ids.delete(task.id);
     for (const id of searchTaskIds(resident, input.projectId, input.archived, input.query)) ids.add(id);
-    return tasks.filter(task => ids.has(task.id)).map(task => task.id);
+    return [...ids].slice(0, 100);
   });
   register('task:events', (raw: unknown) => {
     const cursor = z.string().min(1).max(200).optional();
@@ -475,7 +490,7 @@ else {
     store = await Store.open(path.join(app.getPath('userData'), 'local-code.sqlite'));
     session = new SessionStore(path.join(app.getPath('userData'), 'ui-session.json'));
     evaluation = new EvaluationController(store, () => utilityProcess.fork(path.join(__dirname, 'worker.cjs'), [], { serviceName: 'Jalo Model Evaluation', stdio: 'pipe' }), broadcast, app.getVersion());
-    tasks = store.summaries(); registerApi();
+    tasks = [...new Map([...store.taskPage().tasks, ...store.busySummaries()].map(task => [task.id, task])).values()]; registerApi();
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Jalo', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }, { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }] }]));
     await createWindow();
     diagnostics.record({ event: 'app_ready' });

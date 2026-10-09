@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { metrics } from './performance';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Project, Task, Settings, Event, Run, RunChange, TaskSummary, TaskDetail, EventCursor, EventPage, RunView } from '../shared/types';
+import type { Project, Task, Settings, Event, Run, RunChange, TaskSummary, TaskDetail, EventCursor, EventPage, RunView, TaskPage, TaskQuery } from '../shared/types';
 import { defaults, busyStatuses } from '../shared/types';
 import { endEvaluation, type EvaluationReport } from '../shared/evaluation';
 import { historyPageSize, recoverPlanText } from '../shared/task-history';
@@ -52,6 +52,7 @@ export class Store {
       db.exec('CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS evaluations (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
       db.exec('CREATE TABLE IF NOT EXISTS task_events (task_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (task_id,seq), UNIQUE (task_id,id))');
       db.exec('CREATE TABLE IF NOT EXISTS task_catalog (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, archived INTEGER NOT NULL, title TEXT NOT NULL, data TEXT NOT NULL, view TEXT NOT NULL, requests TEXT NOT NULL, recovery INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS task_catalog_project ON task_catalog(project_id,archived)');
+      db.exec("CREATE INDEX IF NOT EXISTS task_catalog_created ON task_catalog(CAST(json_extract(data,'$.createdAt') AS INTEGER) DESC,id DESC); CREATE INDEX IF NOT EXISTS task_catalog_page ON task_catalog(project_id,archived,CAST(json_extract(data,'$.createdAt') AS INTEGER) DESC,id DESC); CREATE INDEX IF NOT EXISTS task_catalog_status ON task_catalog(json_extract(data,'$.status'))");
       for (const report of store.evaluations()) if (report.status === 'running') store.saveEvaluation(endEvaluation(report, 'interrupted', '应用退出时实测未完成，请手动重新测试'));
       // A migration reads one task at a time. Normal startup only hydrates tasks
       // with unfinished runs/checkpoints, never all completed history.
@@ -108,6 +109,22 @@ export class Store {
   }
   tasks(): Task[] { return this.db.prepare('SELECT id FROM tasks').all().map(({ id }) => this.task(String(id))).sort((a, b) => b.createdAt - a.createdAt); }
   summaries(): TaskSummary[] { return this.all<TaskSummary>('task_catalog').sort((a, b) => b.createdAt - a.createdAt); }
+  taskCount() { return Number(this.db.prepare('SELECT count(*) AS count FROM task_catalog').get()!.count); }
+  busySummaries(): TaskSummary[] {
+    return this.db.prepare("SELECT data FROM task_catalog WHERE json_extract(data,'$.status') IN ('queued','running','waiting')").all().map(row => JSON.parse(String(row.data)));
+  }
+  taskPage(input: TaskQuery = {}): TaskPage {
+    const limit = Math.max(1, Math.min(100, input.limit ?? 100)), term = (input.query || '').trim().toLocaleLowerCase();
+    const where: string[] = [], values: (string | number)[] = [];
+    if (input.projectId !== undefined) { where.push('project_id=?'); values.push(input.projectId); }
+    if (input.archived !== undefined) { where.push('archived=?'); values.push(Number(input.archived)); }
+    if (term) { where.push('(instr(title,?)>0 OR EXISTS (SELECT 1 FROM json_each(task_catalog.requests) WHERE instr(value,?)>0))'); values.push(term, term); }
+    if (input.cursor) { where.push("(CAST(json_extract(data,'$.createdAt') AS INTEGER),id)<(?,?)"); values.push(input.cursor.createdAt, input.cursor.id); }
+    const rows = this.db.prepare(`SELECT data FROM task_catalog ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY CAST(json_extract(data,'$.createdAt') AS INTEGER) DESC,id DESC LIMIT ?`).all(...values, limit + 1);
+    const tasks: TaskSummary[] = rows.slice(0, limit).map(row => JSON.parse(String(row.data))), last = tasks.at(-1);
+    const counts = input.projectId ? this.db.prepare('SELECT archived,count(*) AS count FROM task_catalog WHERE project_id=? GROUP BY archived').all(input.projectId) : [];
+    return { tasks, ...(rows.length > limit && last ? { next: { createdAt: last.createdAt, id: last.id } } : {}), counts: [Number(counts.find(row => row.archived === 0)?.count || 0), Number(counts.find(row => row.archived === 1)?.count || 0)] };
+  }
   summary(id: string): TaskSummary {
     const summary = this.get<TaskSummary>('task_catalog', id);
     if (!summary) throw new Error('任务不存在');
@@ -159,7 +176,7 @@ export class Store {
   }
   search(projectId: string, archived: boolean, query: string): string[] {
     const term = query.trim().toLocaleLowerCase();
-    return this.db.prepare('SELECT id FROM task_catalog WHERE project_id=? AND archived=? AND (?=\'\' OR instr(title,?)>0 OR EXISTS (SELECT 1 FROM json_each(task_catalog.requests) WHERE instr(value,?)>0))').all(projectId, Number(archived), term, term, term).map(({ id }) => String(id));
+    return this.taskPage({ projectId, archived, query: term }).tasks.map(task => task.id);
   }
   changes(id: string) { const row = this.get<StoredTask>('tasks', id); if (!row) throw new Error('任务不存在'); return row.changes; }
   hasPending(id: string) { return this.pending.has(id); }

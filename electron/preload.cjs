@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('localCode', Object.freeze({
   archiveTask: (taskId, archived) => ipcRenderer.invoke('task:archive', { taskId, archived }),
   taskEvents: input => ipcRenderer.invoke('task:events', input),
   taskDetail: taskId => ipcRenderer.invoke('task:detail', taskId),
+  taskSummary: taskId => ipcRenderer.invoke('task:summary', taskId),
+  taskPage: input => ipcRenderer.invoke('tasks:page', input),
   searchTasks: input => ipcRenderer.invoke('tasks:search', input),
   planText: (taskId, runId) => ipcRenderer.invoke('runs:plan', { taskId, runId }),
   changePatch: input => ipcRenderer.invoke('changes:patch', input),

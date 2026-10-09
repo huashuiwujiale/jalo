@@ -47,14 +47,16 @@ export interface Task {
 export interface TaskSummary extends Pick<Task, 'id' | 'projectId' | 'title' | 'model' | 'status' | 'createdAt' | 'queuedAt' | 'archivedAt' | 'currentRunId' | 'mode' | 'error' | 'legacy' | 'historyIncomplete'> {
   revision: number; eventCount: number; changeCount: number; runIds: string[]; requestCount: number;
 }
+export interface TaskQuery { projectId?: string; archived?: boolean; query?: string; limit?: number; cursor?: { createdAt: number; id: string } }
+export interface TaskPage { tasks: TaskSummary[]; next?: { createdAt: number; id: string }; counts: [number, number] }
 export interface ChangeView { path: string; changed: boolean; patchVersion: string }
 export interface RunChangeView extends ChangeView, Pick<RunChange, 'id' | 'runId' | 'state' | 'check' | 'revertedAt'> {}
 export interface RunView extends Omit<Run, 'references' | 'changes' | 'planText'> { references: FileReference[]; changes: RunChangeView[]; hasPlan: boolean }
 export interface StreamState { taskId: string; runId: string; version: number; text: string; ended: boolean }
 export interface StreamFrame extends Omit<StreamState, 'ended'> { kind: 'reset' | 'append' | 'end'; offset: number }
 export interface TaskDetail extends Omit<Task, 'messages' | 'runs' | 'changes'> { revision: number; runs: RunView[]; changes: ChangeView[]; stream?: StreamState }
-export interface Snapshot { sequence: number; projects: Project[]; tasks: TaskSummary[]; settings: Settings; activeId?: string; evaluations?: import('./evaluation').EvaluationReport[] }
-export interface AppUpdate extends Partial<Pick<Snapshot, 'projects' | 'settings' | 'evaluations'>> { sequence: number; tasks: TaskSummary[]; activeId?: string }
+export interface Snapshot { sequence: number; catalogVersion?: number; projects: Project[]; tasks: TaskSummary[]; settings: Settings; activeId?: string; evaluations?: import('./evaluation').EvaluationReport[] }
+export interface AppUpdate extends Partial<Pick<Snapshot, 'projects' | 'settings' | 'evaluations' | 'catalogVersion'>> { sequence: number; tasks: TaskSummary[]; activeId?: string }
 export interface AppInfo {
   version: string; packaged: boolean; platform: string; arch: string;
   electron: string; chrome: string; node: string; osRelease: string;
@@ -91,6 +93,8 @@ export interface Api {
   archiveTask(taskId: string, archived: boolean): Promise<void>;
   taskEvents(input: { taskId: string } & EventCursor): Promise<EventPage>;
   taskDetail(taskId: string): Promise<TaskDetail>;
+  taskSummary(taskId: string): Promise<TaskSummary>;
+  taskPage(input: TaskQuery): Promise<TaskPage>;
   searchTasks(input: { projectId: string; archived: boolean; query: string }): Promise<string[]>;
   planText(taskId: string, runId: string): Promise<string>;
   changePatch(input: { taskId: string; runId?: string; path: string }): Promise<{ patch: string; version: string }>;

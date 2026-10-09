@@ -48,6 +48,7 @@ function App() {
   const [sessionReady, setSessionReady] = useState(false);
   const [viewRevision, setViewRevision] = useState(0);
   const sessions = useRef(emptySession());
+  const projectSwitch = useRef(0);
   const currentView = useRef<SessionView>(emptyView(''));
   const pendingPosition = useRef<SessionView['scroll'] | undefined>(undefined);
   const restoredTop = useRef<number | undefined>(undefined);
@@ -131,6 +132,7 @@ function App() {
     currentView.current = view; persistView(view);
   }
   function openView(view: SessionView, saveCurrent = true) {
+    projectSwitch.current++;
     if (saveCurrent) { rememberCurrent(); saver.current!.flush(); }
     currentView.current = view; pendingPosition.current = view.scroll;
     expanded.current = new Set(view.scroll.expanded);
@@ -191,10 +193,16 @@ function App() {
     if (element.firstElementChild) observer.observe(element.firstElementChild);
     return () => observer.disconnect();
   }, [sessionReady, projectId, taskId, task?.id]);
-  const chooseProject = (id: string) => {
+  const chooseProject = async (id: string) => {
     if (sending || id === projectId || !state.projects.some(p => p.id === id)) return;
     rememberCurrent(); saver.current!.flush();
-    openView(restoreView(sessions.current,state,{projectId:id,taskId:sessions.current.projectTasks[id] || ''}), false);
+    const sequence = ++projectSwitch.current;
+    const remembered = sessions.current.projectTasks[id]; let next = state;
+    if (remembered && !next.tasks.some(t => t.id === remembered)) {
+      try { const task = await api.taskSummary(remembered); if (sequence !== projectSwitch.current) return; next = { ...state, tasks: [task, ...state.tasks] }; setState(current => ({ ...current, tasks: [task, ...current.tasks.filter(t => t.id !== task.id)] })); } catch {}
+    }
+    if (sequence !== projectSwitch.current) return;
+    openView(restoreView(sessions.current,next,{projectId:id,taskId:remembered || ''}), false);
   };
   const addProject = async () => { if(sending)return;setSending(true);try { const p = await api.addProject(); if (p) { const snapshot=await api.snapshot();setState(current => current.sequence > snapshot.sequence ? current : snapshot);openView(restoreView(sessions.current,snapshot,{projectId:p.id,taskId:sessions.current.projectTasks[p.id] || ''})); } } catch (e) { fail(e); } finally {setSending(false);} };
   const submit = async (planRunId?: string) => {
@@ -215,7 +223,7 @@ function App() {
     } catch (e) { fail(e); }
     finally { setSending(false); }
   };
-  const chooseTask = (t: TaskSummary) => { if(sending || t.id===taskId)return;openView(restoreView(sessions.current,state,{projectId:t.projectId,taskId:t.id})); };
+  const chooseTask = (t: TaskSummary) => { if(sending || t.id===taskId)return; const next = { ...state, tasks: [t, ...state.tasks.filter(old => old.id !== t.id)] }; setState(next); openView(restoreView(sessions.current,next,{projectId:t.projectId,taskId:t.id})); };
   const newTask = () => { if(sending || !taskId)return;openView(restoreView(sessions.current,state,{projectId,taskId:''})); };
   if(!sessionReady)return <div className="session-loading" role="status">{error || '正在恢复本地会话…'}{error && <button onClick={()=>window.location.reload()}>重试</button>}</div>;
   return <div className="app-shell">
@@ -224,7 +232,7 @@ function App() {
       <button className="new-task" disabled={sending} onClick={newTask}><Plus size={17}/>新建任务<span className="keycap">N</span></button>
       <div className="section-label">工作空间<button title="添加项目" onClick={addProject}><FolderPlus size={15}/></button></div>
       <div className="projects">{state.projects.map(p => <div className="project-row" key={p.id}><button className={`project-item ${p.id === projectId ? 'selected' : ''}`} title={p.path} disabled={sending} onClick={() => chooseProject(p.id)}><Folder size={16}/><span>{p.name}</span>{p.id === projectId && <span className="selected-dot"/>}</button><button className="remove-project" title="移除项目（保留文件和历史）" aria-label={`移除项目：${p.name}`} disabled={sending || state.tasks.some(t => t.projectId === p.id && busyStatuses.includes(t.status))} onClick={() => setRemovingProject(p)}><X size={13}/></button></div>)}{!state.projects.length && <button className="empty-project" onClick={addProject}><FolderPlus size={17}/>添加第一个项目</button>}</div>
-      <TaskHistory key={projectId} tasks={state.tasks} projectId={projectId} taskId={taskId} choose={chooseTask} disabled={sending} fail={fail}/>
+      <TaskHistory key={projectId} catalogVersion={state.catalogVersion} tasks={state.tasks} projectId={projectId} taskId={taskId} choose={chooseTask} disabled={sending} fail={fail}/>
       <div className="sidebar-bottom"><div className="local-badge"><span className="green-dot"/>本地模型 · 本地记录</div><button onClick={() => setSettingsOpen(true)}><Settings2 size={16}/>模型与设置<ChevronRight size={15}/></button></div>
     </aside>
     <main className="workspace">

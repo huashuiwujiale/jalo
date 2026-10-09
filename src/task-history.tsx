@@ -1,37 +1,24 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Archive, ArchiveRestore, Pencil, MessageSquare, Search } from 'lucide-react';
 import { busyStatuses, type Api, type Project, type TaskSummary } from '../shared/types';
-import { useRemoteResource } from './remote-resource';
+import { mergeTaskSummaries, useTaskPages } from './task-pages';
 import { taskListWindow, taskRowHeight, taskRowScrollTop } from './task-list-window';
 import './task-history.css';
 const api: Api = window.localCode;
 const statuses: Record<TaskSummary['status'], string> = { queued:'排队中',running:'执行中',waiting:'等待确认',completed:'本轮结束',failed:'执行失败',cancelled:'已停止',interrupted:'已中断' };
-export function TaskHistory({ tasks, projectId, taskId, choose, disabled, fail }: { tasks: TaskSummary[]; projectId: string; taskId: string; choose: (task: TaskSummary) => void; disabled: boolean; fail: (error: unknown) => void }) {
+export function TaskHistory({ tasks, projectId, taskId, choose, disabled, fail, catalogVersion }: { catalogVersion?: number; tasks: TaskSummary[]; projectId: string; taskId: string; choose: (task: TaskSummary) => void; disabled: boolean; fail: (error: unknown) => void }) {
   const [query, setQuery] = useState(''), [archived, setArchived] = useState(false);
   const [rename, setRename] = useState<TaskSummary>(), [title, setTitle] = useState(''), [saving, setSaving] = useState(false);
   const [search, setSearch] = useState('');
   const list = useRef<HTMLElement>(null), scrollFrame = useRef<number | undefined>(undefined), focusRequest = useRef<string | undefined>(undefined);
   const [viewport, setViewport] = useState({ top: 0, height: 480 }), [focusedId, setFocusedId] = useState('');
   useEffect(() => { const timer = setTimeout(() => setSearch(query.trim()), 150); return () => clearTimeout(timer); }, [query]);
-  const { selectedTask, projectTasks, counts } = useMemo(() => {
-    const projectTasks: TaskSummary[] = [], counts = [0, 0];
-    let selectedTask: TaskSummary | undefined;
-    for (const task of tasks) {
-      if (task.id === taskId) selectedTask = task;
-      if (task.projectId !== projectId) continue;
-      projectTasks.push(task); counts[task.archivedAt ? 1 : 0]++;
-    }
-    return { selectedTask, projectTasks, counts };
-  }, [tasks, projectId, taskId]);
+  const selectedTask = tasks.find(t => t.id === taskId);
   useEffect(()=>{setArchived(!!selectedTask?.archivedAt);},[taskId,selectedTask?.archivedAt]);
-  const candidates = useMemo(() => projectTasks.filter(task => !!task.archivedAt === archived), [projectTasks, archived]);
-  const searchKey = useMemo(() => search ? JSON.stringify([projectId, archived, search, candidates.map(task => [task.id, task.title, task.requestCount])]) : '', [projectId, archived, search, candidates]);
-  const matches = useRemoteResource(searchKey, () => api.searchTasks({ projectId, archived, query: search }));
-  const visible = useMemo(() => {
-    if (!search) return candidates;
-    const ids = new Set(matches.value);
-    return candidates.filter(task => ids.has(task.id));
-  }, [candidates, search, matches.value]);
+  const version = String(catalogVersion || 0);
+  const pages = useTaskPages(api, { projectId, archived, query: search }, version);
+  const counts = pages.page?.counts || [0, 0];
+  const visible = useMemo(() => mergeTaskSummaries(pages.page?.tasks || [], tasks).filter(t => !!t.archivedAt === archived), [pages.page, tasks, archived]);
   const indices = useMemo(() => new Map(visible.map((task, index) => [task.id, index])), [visible]);
   const selectedIndex = indices.get(taskId) ?? -1;
   const rows = taskListWindow(visible.length, viewport.top, viewport.height);
@@ -94,7 +81,7 @@ export function TaskHistory({ tasks, projectId, taskId, choose, disabled, fail }
         <button data-task-select={index} tabIndex={active ? 0 : -1} aria-current={taskId === t.id ? 'page' : undefined} disabled={disabled} onClick={() => choose(t)} className={`task-item ${taskId === t.id ? 'selected' : ''}`} title={t.title}><MessageSquare size={14}/><span><strong>{t.title}</strong><small><i className={`status-dot ${t.status}`}/>{statuses[t.status]}</small></span></button>
         <div className="history-actions"><button tabIndex={active ? 0 : -1} aria-label={`重命名任务：${t.title}`} title="重命名" disabled={disabled || saving} onClick={() => { setRename(t); setTitle(t.title); }}><Pencil size={12}/></button><button tabIndex={active ? 0 : -1} aria-label={`${t.archivedAt ? '恢复' : '归档'}任务：${t.title}`} title={busyStatuses.includes(t.status) ? '请先停止或完成任务' : t.archivedAt ? '恢复任务' : '归档任务'} disabled={disabled || saving || busyStatuses.includes(t.status)} onClick={() => archive(t)}>{t.archivedAt ? <ArchiveRestore size={12}/> : <Archive size={12}/>}</button></div>
       </div>;
-    })}</div></div>{matches.error && <p className="sidebar-hint" role="alert">{matches.error}<button onClick={matches.retry}>重试搜索</button></p>}{!visible.length && !matches.error && <p className="sidebar-hint">{search ? matches.value ? '没有匹配的任务。' : '正在搜索…' : archived ? '暂无已归档任务。' : '从一个想法开始。你的任务会保存在这里。'}</p>}</nav>
+    })}</div></div>{pages.error && <p className="sidebar-hint" role="alert">{pages.error}<button onClick={pages.retry}>重试</button></p>}{pages.page?.next && <button className="sidebar-hint" disabled={pages.loading} onClick={() => void pages.more()}>{pages.loading ? '加载中…' : '加载更多任务'}</button>}{!visible.length && !pages.error && <p className="sidebar-hint">{pages.loading ? '加载中…' : search ? '没有匹配的任务。' : archived ? '暂无已归档任务。' : '从一个想法开始。你的任务会保存在这里。'}</p>}</nav>
     {rename && <div className="modal-backdrop"><form className="management-modal" role="dialog" aria-modal="true" aria-label="重命名任务" onSubmit={async e => { e.preventDefault(); if (!title.trim() || saving) return; setSaving(true); try { await api.renameTask(rename.id,title); setRename(undefined); } catch(error) { fail(error); } finally { setSaving(false); } }}>
       <h3>重命名任务</h3><label>任务名称<input autoFocus aria-label="任务名称" maxLength={100} value={title} onChange={e => setTitle(e.target.value)}/></label><footer><button type="button" disabled={saving} onClick={() => setRename(undefined)}>取消</button><button className="primary" disabled={saving || !title.trim()}>保存</button></footer>
     </form></div>}

@@ -84,6 +84,9 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const taskId=await invoke('task:submit',{projectId:project.id,prompt:'先计划',mode:'plan',references:[ref]});
     await assert.rejects(invoke('evaluation:start'),/请先停止/);
     const snapshot=async()=>{ const summary=await invoke('app:snapshot'); return {...summary,tasks:await Promise.all(summary.tasks.map((task:any)=>invoke('task:detail',task.id)))}; };
+    const firstPage=await invoke('tasks:page',{projectId:project.id,archived:false,limit:1});assert.equal(firstPage.tasks[0].id,taskId);assert.deepEqual(firstPage.counts,[1,0]);
+    await assert.rejects(invoke('tasks:page',{projectId:project.id,limit:101}));
+    await assert.rejects(handlers.get('tasks:page')!({sender:{},senderFrame:{}},{projectId:project.id}),/无效的调用来源/);
     const catalog=await invoke('app:snapshot');
     assert.ok(!('messages' in catalog.tasks[0]));assert.ok(!('events' in catalog.tasks[0]));assert.ok(!('runs' in catalog.tasks[0]));assert.ok(!('changes' in catalog.tasks[0]));
     await assert.rejects(invoke('task:detail',randomUUID()),/任务不存在/);
