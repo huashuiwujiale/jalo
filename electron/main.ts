@@ -9,6 +9,8 @@ import { z } from 'zod';
 import { captureReferences, previewFile, referenceFile, referenceContext, searchFiles, listDirectory, rollbackPreview, restoreFile } from '../engine/project-files';
 import { createTwoFilesPatch } from 'diff';
 import { Store } from './store';
+import { CommandManager } from './commands';
+import { projectFiles } from '../engine/project-files';
 import { captureContinuation, prepareContinuation, continuationContext, validateContinuationBudget } from '../engine/continuation';
 import type { StopReason } from '../shared/continuation';
 import { gitStatus, gitPatch } from '../engine/git-review';
@@ -25,7 +27,7 @@ import { ReplyStream, UpdateBatch } from './ipc-updates';
 import { fileNameIndex } from '../engine/file-search';
 import { webLink } from '../shared/markdown';
 import { workerInput, MessagePatchReceiver, type WorkerEvent } from '../shared/worker-wire';
-import { busyStatuses, type AppInfo, type Settings, type Snapshot, type Task, type Run, type Progress, type TaskSummary } from '../shared/types';
+import { busyStatuses, type AppInfo, type Settings, type Snapshot, type Task, type Run, type Progress, type TaskSummary, type Approval } from '../shared/types';
 
 // Keep legacy identity when upgrading: macOS safeStorage keys also depend on the app name.
 const legacyDataPath = path.join(app.getPath('appData'), 'Local Code');
@@ -52,9 +54,9 @@ function readTask(id: string) {
   return task;
 }
 function releaseTasks() {
-  for (const [id, task] of residentTasks) if (!busyStatuses.includes(task.status) && !projectLocks.has(task.projectId) && !store.hasPending(id)) residentTasks.delete(id);
+  for (const [id, task] of residentTasks) if (!busyStatuses.includes(task.status) && !projectLocks.has(task.projectId) && !store.hasPending(id) && !commands.hasTask(id)) residentTasks.delete(id);
 }
-let active: { task: Task; worker: UtilityProcess; timer?: ReturnType<typeof setTimeout>; pids: Set<number> } | undefined;
+let active: { task: Task; worker: UtilityProcess; timer?: ReturnType<typeof setTimeout>; pids: Set<number>; commandApproval?: Approval } | undefined;
 let modelOperation = false, quitting = false, storageFailed = false;
 let session: SessionStore;
 let closingProjectIds: string[] = [];
@@ -62,12 +64,22 @@ let evaluation: EvaluationController;
 let submitTask: (input: unknown, followupId?: string) => Promise<string>;
 const configs = new Map<string, Settings>();
 const projectLocks = new Set<string>();
+const commands = new CommandManager((owner, command) => {
+  if (storageFailed) throw new Error('任务存储不可用，已停止终端');
+  const task = readTask(owner.taskId), run = task.runs?.find(r => r.id === owner.runId);
+  if (!run) throw new Error('命令所属轮次不存在');
+  run.commands ??= [];
+  const index = run.commands.findIndex(c => c.id === command.id);
+  if (index < 0) run.commands.push(command); else run.commands[index] = command;
+  if (command.status !== 'running') fileNameIndex.clear();
+  persist(task, index < 0 || command.status !== 'running' ? 'immediate' : 'deferred', run.id);
+});
 const rollbackTokens = new Map<string, { taskId: string; runId: string; path: string; afterVersion: string; expires: number }>();
 const currentRun = (task: Task) => task.runs?.find(r => r.id === task.currentRunId);
 function syncRun(task: Task) { const run = currentRun(task); if (run) { run.status = task.status; run.error = task.error; if (!busyStatuses.includes(task.status)) { run.endedAt ??= Date.now(); if (run.progress) run.progress.endedAt ??= run.endedAt; } } }
 function sealRun(task: Task, reason: StopReason) {
   syncRun(task); const run = currentRun(task); if (!run) return;
-  for (const command of run.commands || []) if (command.status === 'running') { command.status = 'interrupted'; command.endedAt = Date.now(); }
+  for (const command of run.commands || []) if (command.status === 'running' && !commands.owns(command.id)) { command.status = 'interrupted'; command.endedAt = Date.now(); }
   run.stopReason = reason; run.handoff = captureContinuation(task, run, reason);
 }
 function progress(task: Task, phase: Progress['phase']) { const run = currentRun(task); if (run) { run.progress = { ...run.progress, phase, since: Date.now(), endedAt: undefined }; diagnostics.record({ event: 'task_phase', taskId: task.id, runId: run.id, phase }); } }
@@ -124,6 +136,7 @@ function storageFailure(task: Task, error: unknown) {
     const previous = active; active = undefined;
     clearTimeout(previous.timer); killProcesses(previous.pids); previous.worker.kill();
   }
+  commands.shutdown();
   configs.delete(task.id); task.approval = undefined; task.status = 'failed';
   task.error = '任务记录保存失败，已停止执行。请检查磁盘空间和数据目录权限后重试。';
   replies.end(task.id); syncRun(task); broadcast(task);
@@ -145,7 +158,7 @@ function finish(task: Task, status: Task['status'], error?: string, reason?: Sto
   if (!active || active.task.id !== task.id) return;
   const previous = active;
   replies.end(task.id);
-  clearTimeout(previous.timer); killProcesses(previous.pids);
+  clearTimeout(previous.timer); killProcesses(previous.pids); commands.stopTask(task.id, false);
   task.status = status; task.error = error; task.approval = undefined;
   sealRun(task, reason || (status === 'completed' ? 'completed' : status === 'cancelled' ? 'cancelled' : status === 'interrupted' ? 'interrupted' : 'error'));
   diagnostics.record({ event: 'task_finished', taskId: task.id, runId: task.currentRunId, status, ...(error ? { errorCategory: errorCategory(error) } : {}) });
@@ -182,6 +195,28 @@ function pump() {
       if (active?.worker !== worker || quitting || event.runId !== task.currentRunId) return;
       try {
         const run = currentRun(task);
+        if (event.type === 'managed-command') {
+          const approved = active.commandApproval; active.commandApproval = undefined;
+          const reply = (result?: string, error?: string) => { if (active?.worker === worker) worker.postMessage({ type: 'command-result', id: event.approval.id, result, error }); };
+          if (!run || run.mode !== 'execute' || run.progress?.phase === 'stopping' || !approved?.tty || JSON.stringify(approved) !== JSON.stringify(event.approval)) { reply(undefined, '终端命令缺少有效的逐条确认'); return; }
+          void (async () => {
+            const files = await projectFiles(project.path);
+            const cwd = await files.resolve(path.relative(project.path, approved.cwd) || '.');
+            if (quitting || active?.worker !== worker || run.progress?.phase === 'stopping') throw new Error('任务已停止');
+            progress(task, 'command');
+            return commands.start({ taskId: task.id, runId: run.id, projectId: task.projectId }, { ...approved, cwd }, path.join(app.getPath('userData'), 'commands', task.id, run.id));
+          })().then(result => reply(result), error => reply(undefined, String(error.message || error)));
+          return;
+        }
+        if (event.type === 'command-status') {
+          try {
+            const id = uuid.parse(event.commandId), ownerRun = task.runs?.find(r => r.commands?.some(c => c.id === id));
+            if (!ownerRun) throw new Error('命令会话不属于当前任务');
+            const record = commands.owns(id) ? commands.snapshot({ taskId: task.id, runId: ownerRun.id, projectId: task.projectId }, id) : ownerRun.commands!.find(c => c.id === id);
+            worker.postMessage({ type: 'command-result', id: event.id, result: JSON.stringify(record) });
+          } catch (error) { worker.postMessage({ type: 'command-result', id: event.id, error: String(error) }); }
+          return;
+        }
         if (event.type === 'followup-applied') {
           const value = task.followups?.find(f => f.id === event.id && f.kind === 'steer');
           if (value) { task.followups = task.followups!.filter(f => f.id !== value.id); task.events.push({ id: value.id, kind: 'message', role: 'user', text: value.prompt, at: Date.now(), runId: run?.id }); persist(task); }
@@ -308,7 +343,7 @@ function registerApi() {
   register('project:remove', (raw: unknown) => {
     const id = uuid.parse(raw), project = store.projects().find(p => p.id === id);
     if (!project) throw new Error('项目不存在或已移除');
-    if (projectLocks.has(id) || tasks.some(t => t.projectId === id && busyStatuses.includes(t.status))) throw new Error('项目存在运行中、等待确认或排队任务，请先停止任务再移除');
+    if (commands.hasProject(id) || projectLocks.has(id) || tasks.some(t => t.projectId === id && busyStatuses.includes(t.status))) throw new Error('项目存在运行中、等待确认或排队任务，请先停止任务再移除');
     store.putProject({ ...project, removedAt: Date.now() }); broadcast();
     fileNameIndex.clear(project.path);
   });
@@ -322,7 +357,7 @@ function registerApi() {
   register('task:archive', (raw: unknown) => {
     const input = z.object({ taskId: uuid, archived: z.boolean() }).strict().parse(raw);
     const task = findSummary(input.taskId);
-    if (projectLocks.has(task.projectId) || busyStatuses.includes(task.status)) throw new Error('请先停止或完成任务，再归档或恢复');
+    if (commands.hasTask(task.id) || projectLocks.has(task.projectId) || busyStatuses.includes(task.status)) throw new Error('请先停止或完成任务，并停止后台终端进程，再归档或恢复');
     const archivedAt = input.archived ? task.archivedAt ?? Date.now() : undefined;
     const resident = residentTasks.get(task.id);
     if (resident) { resident.archivedAt = archivedAt; persist(resident); }
@@ -393,6 +428,15 @@ function registerApi() {
     if (run.mode !== 'plan' || run.status !== 'completed' || !run.planText?.trim()) throw new Error('该计划缺少完整保存的正文，请重新生成计划后执行');
     return run.planText;
   });
+  const commandTarget = { taskId: uuid, runId: uuid, commandId: uuid };
+  const commandOwner = (input: { taskId: string; runId: string; commandId: string }) => {
+    const task = residentTasks.get(input.taskId) || store.view(input.taskId);
+    if (!task.runs?.find(r => r.id === input.runId)?.commands?.some(c => c.id === input.commandId)) throw new Error('命令记录不属于当前轮次');
+    return { taskId: task.id, runId: input.runId, projectId: task.projectId };
+  };
+  register('command:input', (raw: unknown) => { const input = z.object({ ...commandTarget, text: z.string().min(1).max(8000) }).strict().parse(raw); commands.input(commandOwner(input), input.commandId, input.text); });
+  register('command:stop', (raw: unknown) => { const input = z.object(commandTarget).strict().parse(raw); commands.stop(commandOwner(input), input.commandId); });
+  register('command:resize', (raw: unknown) => { const input = z.object({ ...commandTarget, cols: z.number().int().min(2).max(500), rows: z.number().int().min(2).max(500) }).strict().parse(raw); commands.resize(commandOwner(input), input.commandId, input.cols, input.rows); });
   register('command:output', (raw: unknown) => {
     const input = z.object({ taskId: uuid, runId: uuid, commandId: uuid, offset: z.number().int().nonnegative().max(16777216).optional() }).strict().parse(raw);
     const task = residentTasks.get(input.taskId), run = task?.runs?.find(r => r.id === input.runId) || store.view(input.taskId).runs.find(r => r.id === input.runId);
@@ -538,6 +582,7 @@ function registerApi() {
   register('task:followup-run', (raw: unknown) => { const input = z.object({ taskId: uuid, id: uuid }).strict().parse(raw); return runFollowup(input.taskId, input.id); });
   register('task:stop', (id: unknown) => {
     const task = readTask(uuid.parse(id));
+    commands.stopTask(task.id);
     if (active?.task.id === task.id) {
       if (currentRun(task)?.progress?.phase !== 'stopping') progress(task, 'stopping');
       task.approval = undefined; task.status = 'running'; persist(task);
@@ -549,6 +594,7 @@ function registerApi() {
   register('task:approve', (raw: unknown) => {
     const value = z.object({ taskId: uuid, approvalId: uuid, allow: z.boolean() }).strict().parse(raw);
     if (!active || active.task.id !== value.taskId || active.task.approval?.id !== value.approvalId) throw new Error('命令确认已过期');
+    active.commandApproval = value.allow && active.task.approval.tty ? { ...active.task.approval } : undefined;
     active.task.approval = undefined; active.task.status = 'running';
     if (currentRun(active.task)?.progress?.phase !== 'stopping') progress(active.task, 'tool');
     const worker = active.worker;
@@ -593,6 +639,7 @@ else {
     try{session?.flush();}catch{diagnostics.record({event:'ipc_error',errorCategory:'permission'});}
     diagnostics.record({ event: 'app_quit' });
     evaluation?.shutdown();
+    commands.shutdown();
     if (active) { clearTimeout(active.timer); killProcesses(active.pids); active.worker.kill(); }
     if (store) {
       try { for (const summary of tasks.filter(t => busyStatuses.includes(t.status))) { const task = readTask(summary.id); task.status = 'interrupted'; task.approval = undefined; task.error = '应用已退出，请检查修改后手动继续。'; sealRun(task, 'interrupted'); store.deferTask(task, task.currentRunId); } store.close(); }

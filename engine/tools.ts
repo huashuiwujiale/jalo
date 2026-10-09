@@ -25,7 +25,8 @@ const specs = {
   write_file: { description: '创建或替换 UTF-8 文件。修改现有文件前必须 read_file；遇到外部修改须重新读取。', schema: z.object({ path: relative, content: str }).strict() },
   edit_file: { description: '精确原文替换，不支持正则。必须先 read_file。oldText 保留原有空格与换行，不包含显示用行号。存在多处相同文本时，同时传 startLine/endLine 限定已读取的目标行范围，范围内仍须唯一匹配。', schema: z.object({ path: relative, oldText: str.min(1).describe('直接复制文件原文，不要添加正则转义或行号'), newText: str, startLine: z.number().int().min(1).optional(), endLine: z.number().int().min(1).optional() }).strict().refine(a => (a.startLine === undefined && a.endLine === undefined) || (a.startLine !== undefined && a.endLine !== undefined && a.endLine >= a.startLine), 'startLine 和 endLine 必须同时传入，且 endLine 不小于 startLine') },
   replace_lines: { description: '按最近一次 read_file 已完整显示的行号替换整行，包含 startLine 和 endLine。删除代码块时优先使用；newText 为空字符串表示删除。无需复制 oldText，替换内容须自行保留正确缩进。每次修改后必须重新读取才能再次按行编辑。', schema: z.object({ path: relative, startLine: z.number().int().min(1), endLine: z.number().int().min(1), newText: str }).strict().refine(a => a.endLine >= a.startLine, 'endLine 不得小于 startLine') },
-  run_command: { description: '申请用户确认后在指定项目目录执行 zsh 命令。每次执行都需要确认；非系统沙箱。', schema: z.object({ command: z.string().min(1).max(8000), cwd: relative.default('.') }).strict() },
+  command_status: { description: '查看本任务已批准的命令会话状态与末尾输出。后台启动不代表完成；根据返回状态判断。', schema: z.object({ commandId: z.string().uuid() }).strict() },
+  run_command: { description: '申请用户确认后在指定项目目录执行 zsh 命令。每次执行都需要确认；非系统沙箱。需要交互时设置 tty；开发服务器等长驻命令设置 background，启动后返回会话 ID，使用 command_status 查看状态。后台会话最长 24 小时，应用退出时终止。', schema: z.object({ command: z.string().min(1).max(8000), cwd: relative.default('.'), tty: z.boolean().default(false), background: z.boolean().default(false) }).strict() },
   show_changes: { description: '查看本次会话通过文件工具产生的修改；不包含原有 Git 改动或命令造成的改动。', schema: z.object({}).strict() },
 };
 export const definitions: ToolDefinition[] = Object.entries(specs).map(([name, spec]) => ({
@@ -39,6 +40,8 @@ export class EditMatchError extends Error {
   constructor(public file: string, message: string) { super(message); this.name = 'EditMatchError'; }
 }
 export interface ToolOptions {
+  managedCommand?: (approval: Approval) => Promise<string>;
+  commandStatus?: (id: string) => Promise<string>;
   commandDirectory?: string;
   root: string; signal: AbortSignal; timeout: number; backupDir: string;
   emit: (event: EngineEvent) => void;
@@ -207,8 +210,11 @@ export class ToolRegistry {
       }
       result = results.join('\n') || '没有匹配结果';
       if (budget.truncated) result += '\n搜索未遍历全部文件（达到上限或目录不可访问），请缩小目录或查询范围';
+    } else if (name === 'command_status') {
+      if (!this.options.commandStatus) throw new Error('当前运行环境不支持持久终端会话');
+      result = await this.options.commandStatus(args.commandId);
     } else if (name === 'run_command') {
-      result = await this.command(args.command, await this.resolve(args.cwd));
+      result = await this.command(args.command, await this.resolve(args.cwd), args.tty, args.background);
     } else {
       const patch = (this.options.reviewChanges || [...this.changes.values()]).map(c => c.patch).join('\n');
       result = patch.slice(0, 32000) + (patch.length > 32000 ? '\n[差异超过工具输出上限，已截断；请结合捕获的审查目标并读取相关文件继续检查。]' : '') || (this.mode() === 'review' ? '当前审查目标没有差异' : '本次任务暂无文件工具修改');
@@ -323,12 +329,16 @@ export class ToolRegistry {
     this.changes.set(rel, change); this.options.emit({ type: 'change', change, checkpoint });
     return `已修改 ${rel}（${check.message}）\n${change.patch.slice(0, 12000)}`;
   }
-  private async command(command: string, cwd: string) {
-    const approval: Approval = { id: randomUUID(), command, cwd, timeout: this.options.timeout };
+  private async command(command: string, cwd: string, tty = false, background = false) {
+    if ((tty || background) && !this.options.managedCommand) throw new Error('当前运行环境不支持 PTY 或后台命令');
+    const approval: Approval = { id: randomUUID(), command, cwd, timeout: background ? 86400 : this.options.timeout, ...(tty || background ? { tty: true, background } : {}) };
     const approved = await this.options.approve(approval);
     this.options.signal.throwIfAborted();
     if (!approved) return '用户拒绝了该命令。未执行，不得尝试通过其他工具绕过。';
     await this.resolve(path.relative(this.root, cwd) || '.');
+    if (tty || background) {
+      try { return await this.options.managedCommand!(approval); } finally { this.seen.clear(); this.readRanges.clear(); }
+    }
     const record: CommandSession = { id: randomUUID(), command, cwd, startedAt: Date.now(), status: 'running' };
     const log = this.options.commandDirectory ? new CommandOutputWriter(this.options.commandDirectory, record.id) : undefined;
     this.options.emit({ type: 'command', command: { ...record } });

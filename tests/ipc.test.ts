@@ -432,6 +432,37 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.ok(continuationRecord.contextStart>0);assert.match(continuationRecord.messages[0].content,/保留文件，只检查现状/);
     continuedWorker.emit('message',{type:'done',runId:continued.currentRunId,status:'completed'});
     await assert.rejects(invoke('task:resume',{taskId:resumeId,runId:resumeRun,version:prepared.version,goal:'stale'}),/续接目标已变化/);
+    // PTY sessions are independently owned, yet require one exact approval per launch.
+    const terminalTask = await invoke('task:submit', { projectId: project.id, prompt: 'terminal fixture' });
+    const terminalWorker = workers.at(-1), terminalRun = (await invoke('task:detail', terminalTask)).currentRunId;
+    const terminalApproval = { id: randomUUID(), command: 'print READY; read line; print "INPUT:$line"; sleep 60', cwd: project.path, tty: true, background: true, timeout: 60 };
+    terminalWorker.emit('message', { type: 'managed-command', runId: terminalRun, approval: terminalApproval });
+    assert.match(terminalWorker.sent.at(-1).error, /逐条确认/);
+    terminalWorker.emit('message', { type: 'approval', runId: terminalRun, approval: terminalApproval });
+    await invoke('task:approve', { taskId: terminalTask, approvalId: terminalApproval.id, allow: true });
+    terminalWorker.emit('message', { type: 'managed-command', runId: terminalRun, approval: terminalApproval });
+    for (let i = 0; i < 100 && !terminalWorker.sent.some((m:any) => m.type === 'command-result' && m.result); i++) await new Promise(r => setTimeout(r, 10));
+    assert.ok(terminalWorker.sent.some((m:any) => m.type === 'command-result' && /尚未完成/.test(m.result)), JSON.stringify(terminalWorker.sent.filter((m:any) => m.type === 'command-result')));
+    const terminalRecord = (await invoke('task:detail', terminalTask)).runs.at(-1).commands[0];
+    const terminalTarget = { taskId: terminalTask, runId: terminalRun, commandId: terminalRecord.id };
+    terminalWorker.emit('message', { type: 'managed-command', runId: terminalRun, approval: terminalApproval });
+    assert.match(terminalWorker.sent.at(-1).error, /逐条确认/);
+    terminalWorker.emit('message', { type: 'command-status', runId: terminalRun, id: randomUUID(), commandId: randomUUID() });
+    assert.match(terminalWorker.sent.at(-1).error, /不属于当前任务/);
+    terminalWorker.emit('message', { type: 'done', runId: terminalRun, status: 'completed' });
+    assert.equal((await invoke('task:detail', terminalTask)).runs.at(-1).commands[0].status, 'running');
+    await assert.rejects(invoke('task:archive', { taskId: terminalTask, archived: true }), /后台终端/);
+    await assert.rejects(invoke('project:remove', project.id), /停止任务/);
+    await assert.rejects(invoke('command:input', { ...terminalTarget, runId: randomUUID(), text: 'bad' }), /不属于/);
+    await assert.rejects(invoke('command:input', { ...terminalTarget, text: 'one\ntwo' }), /单行/);
+    await invoke('command:resize', { ...terminalTarget, cols: 90, rows: 35 });
+    await invoke('command:input', { ...terminalTarget, text: 'hello' });
+    let terminalOutput = '';
+    for (let i = 0; i < 100 && !terminalOutput.includes('INPUT:hello'); i++) { terminalOutput = (await invoke('command:output', terminalTarget)).text; await new Promise(r => setTimeout(r, 10)); }
+    assert.match(terminalOutput, /INPUT:hello/);
+    await invoke('command:stop', terminalTarget);
+    assert.equal((await invoke('task:detail', terminalTask)).runs.at(-1).commands[0].status, 'interrupted');
+    await assert.rejects(invoke('command:input', { ...terminalTarget, text: 'late' }), /已结束/);
     await fs.writeFile(path.join(root,'a.txt'),'review while closing');
     const closingTarget=await invoke('git:patch',{projectId:project.id,path:'a.txt'}), beforeClosing=workers.length;
     const closingSubmit=invoke('task:submit',{projectId:project.id,prompt:'must not start during exit',mode:'review',gitReview:{path:'a.txt',version:closingTarget.version}});

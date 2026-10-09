@@ -5,6 +5,7 @@
   "extraMetadata": { "main": "dist/electron/main.cjs" },
   "files": ["dist/**/*", "package.json", "LICENSE"],
   "asar": true,
+  "asarUnpack": ["node_modules/node-pty/**/*"],
   "npmRebuild": false,
   "mac": {
     "target": [{ "target": "dmg", "arch": ["arm64"] }],

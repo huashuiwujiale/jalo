@@ -21,7 +21,7 @@ export function captureContinuation(task: Task, run: Run, reason: StopReason): C
   const issues = task.events.filter(e => e.kind === 'error' || (e.toolPhase === 'result' && /用户拒绝了该命令|无完整结果|未执行：/.test(e.text))).map(e => excerpt(e.text, 400));
   const notes = [...new Set(task.events.filter(e => e.role === 'assistant').flatMap(e => e.text.split('\n').filter(line => /计划|待办|待验收|剩余|下一步|未完成|TODO/i.test(line))).map(line => excerpt(line, 400)))];
   return { version: 1, runId: run.id, mode: run.mode, at: run.endedAt || run.createdAt, reason, step: run.progress?.step,
-    files: [...files.values()].slice(-24), commands: commands.slice(-8).map(c => ({ command: excerpt(c.command, 400), status: c.status, exitCode: c.exitCode, timedOut: c.timedOut })),
+    files: [...files.values()].slice(-24), commands: commands.slice(-8).map(c => ({ id: c.id, background: c.background, command: excerpt(c.command, 400), status: c.status, exitCode: c.exitCode, timedOut: c.timedOut })),
     issues: issues.slice(-8), notes: notes.slice(-6), omitted: { files: Math.max(0, files.size - 24), commands: Math.max(0, commands.length - 8), issues: Math.max(0, issues.length - 8), notes: Math.max(0, notes.length - 6) } };
 }
 export function continuationRequests(task: Task, run: Run) {

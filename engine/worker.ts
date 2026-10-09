@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Approval, EngineEvent, Settings } from '../shared/types';
 import { MessagePatchSender, type WorkerInput } from '../shared/worker-wire';
 import { LMStudioProvider } from './provider';
@@ -16,6 +17,7 @@ let pending: { id: string; resolve: (allow: boolean) => void } | undefined;
 let started = false;
 let runId: string | undefined;
 let messages: MessagePatchSender;
+const commandReplies = new Map<string, { resolve: (value: string) => void; reject: (error: Error) => void }>();
 const checkpoints = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
 const emit = (event: EngineEvent) => {
   if (event.type === 'messages') {
@@ -27,9 +29,10 @@ const approve = (approval: Approval) => new Promise<boolean>(resolve => {
   pending = { id: approval.id, resolve }; emit({ type: 'approval', approval });
 });
 port.on('message', async ({ data }: any) => {
+  if (data.type === 'command-result') { const pending = commandReplies.get(data.id); commandReplies.delete(data.id); if (data.error) pending?.reject(new Error(data.error)); else pending?.resolve(data.result); return; }
   if (data.type === 'steer') { if (!controller.signal.aborted && runId && data.runId === runId) steering.add(data.followup); return; }
   if (data.type === 'checkpoint-ack') { const waiting = checkpoints.get(data.id); checkpoints.delete(data.id); if (data.error) waiting?.reject(new Error(data.error)); else waiting?.resolve(); return; }
-  if (data.type === 'cancel') { controller.abort(); for (const c of checkpoints.values()) c.reject(new Error('任务已停止')); checkpoints.clear(); pending?.resolve(false); pending = undefined; return; }
+  if (data.type === 'cancel') { controller.abort(); for (const c of commandReplies.values()) c.reject(new Error('任务已停止')); commandReplies.clear(); for (const c of checkpoints.values()) c.reject(new Error('任务已停止')); checkpoints.clear(); pending?.resolve(false); pending = undefined; return; }
   if (data.type === 'evaluate' && !started) {
     started = true;
     await runEvaluation(data.report, data.settings, data.home, controller.signal, report => port.postMessage({ type: 'evaluation-update', report }));
@@ -69,7 +72,7 @@ port.on('message', async ({ data }: any) => {
       settings.model = await provider.load(model.key, settings.contextLength, controller.signal);
     }
     if (settings.maxTokens >= settings.contextLength / 2) throw new Error('已加载模型的上下文过小，请卸载后使用更大上下文重新加载，或降低最大输出');
-    const registry = new ToolRegistry({ root, backupDir, commandDirectory, signal: controller.signal, timeout: settings.commandTimeout, emit, approve, changes: input.changes, mode: run.mode, runId, reviewChanges: input.reviewChanges, checkpoint: change => new Promise<void>((resolve, reject) => { checkpoints.set(change.id, { resolve, reject }); emit({ type: 'checkpoint', checkpoint: change }); }) });
+    const registry = new ToolRegistry({ managedCommand: approval => new Promise((resolve, reject) => { commandReplies.set(approval.id, { resolve, reject }); emit({ type: 'managed-command', approval }); }), commandStatus: commandId => new Promise((resolve, reject) => { const id = randomUUID(); commandReplies.set(id, { resolve, reject }); emit({ type: 'command-status', id, commandId }); }), root, backupDir, commandDirectory, signal: controller.signal, timeout: settings.commandTimeout, emit, approve, changes: input.changes, mode: run.mode, runId, reviewChanges: input.reviewChanges, checkpoint: change => new Promise<void>((resolve, reject) => { checkpoints.set(change.id, { resolve, reject }); emit({ type: 'checkpoint', checkpoint: change }); }) });
     await new TaskRunner(provider, registry, settings, emit, controller.signal, () => steering.take()).run({ messages: input.messages });
   } catch (error) {
     emit({ type: 'done', status: controller.signal.aborted ? 'cancelled' : 'failed', error: controller.signal.aborted ? undefined : (error as Error).message });

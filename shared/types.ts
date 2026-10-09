@@ -26,7 +26,7 @@ export interface CapturedReference extends FileReference { content: string }
 export interface FilePage { path: string; version: string; totalLines: number; startLine: number; endLine: number; content: string; hasMore: boolean }
 export interface CheckResult { path: string; status: 'passed' | 'failed' | 'skipped'; parser: string; message: string; at: number; version: string }
 export interface RunChange extends Change { id: string; runId: string; beforeVersion: string | null; afterVersion: string; check: CheckResult; state: 'prepared' | 'written' | 'reverted' | 'uncertain'; revertedAt?: number }
-export interface CommandSession { id: string; command: string; cwd: string; startedAt: number; endedAt?: number; status: 'running' | 'completed' | 'interrupted'; exitCode?: number; timedOut?: boolean; totalBytes?: number; outputBytes?: number; outputTruncated?: boolean; tail?: string }
+export interface CommandSession { tty?: boolean; background?: boolean; id: string; command: string; cwd: string; startedAt: number; endedAt?: number; status: 'running' | 'completed' | 'interrupted'; exitCode?: number; timedOut?: boolean; totalBytes?: number; outputBytes?: number; outputTruncated?: boolean; tail?: string }
 export interface CommandOutputPage { text: string; next: number; totalBytes: number; hasMore: boolean }
 export interface GitFile { path: string; originalPath?: string; index: string; workingTree: string }
 export interface GitStatus { available: boolean; files: GitFile[]; truncated: boolean }
@@ -36,7 +36,7 @@ export interface Run { stopReason?: import('./continuation').StopReason; handoff
 export interface SubmitInput { continuation?: { runId: string; version: string }; gitReview?: GitReview; projectId: string; prompt: string; taskId?: string; model?: string; mode?: Mode; references?: FileReference[]; planRunId?: string; reviewRunId?: string }
 export interface RollbackPreview { token: string; patch: string; path: string; createsRecoveryCopy: boolean }
 export interface Change { path: string; before: string | null; after: string; patch: string }
-export interface Approval { id: string; command: string; cwd: string; timeout: number }
+export interface Approval { tty?: boolean; background?: boolean; id: string; command: string; cwd: string; timeout: number }
 export interface Event { id: string; at: number; kind: 'message' | 'tool' | 'output' | 'notice' | 'error'; text: string; role?: string; runId?: string; toolCallId?: string; toolPhase?: 'call' | 'result' | 'error' }
 export interface EventPage { events: Event[]; start: number; hasMore: boolean; total: number }
 export type EventCursor =
@@ -72,6 +72,8 @@ export interface AppInfo {
   dataDirectory: string; logDirectory: string; logsAvailable: boolean;
 }
 export type EngineEvent = (
+  | { type: 'managed-command'; approval: Approval }
+  | { type: 'command-status'; id: string; commandId: string }
   | { type: 'followup-applied'; id: string }
   | { type: 'context'; usage: import('./context').ContextUsage }
   | { type: 'progress'; progress: Progress }
@@ -112,6 +114,9 @@ export interface Api {
   gitPatch(input: { projectId: string; path: string }): Promise<GitPatch>;
   continuationPreview(taskId: string): Promise<import('./continuation').ContinuationPreview>;
   resumeTask(input: { taskId: string; runId: string; version: string; goal: string; model?: string }): Promise<string>;
+  commandInput(input: { taskId: string; runId: string; commandId: string; text: string }): Promise<void>;
+  commandStop(input: { taskId: string; runId: string; commandId: string }): Promise<void>;
+  commandResize(input: { taskId: string; runId: string; commandId: string; cols: number; rows: number }): Promise<void>;
   commandOutput(input: { taskId: string; runId: string; commandId: string; offset?: number }): Promise<CommandOutputPage>;
   changePatch(input: { taskId: string; runId?: string; path: string }): Promise<{ patch: string; version: string }>;
   saveSettings(settings: Settings): Promise<void>;

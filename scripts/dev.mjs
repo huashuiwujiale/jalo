@@ -1,3 +1,4 @@
+import './prepare-pty.mjs';
 import { createServer } from 'vite';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';

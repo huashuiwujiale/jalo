@@ -5,7 +5,7 @@ export const stopLabels: Record<StopReason, string> = { steps: '达到步骤上�
 export interface ContinuationCheckpoint {
   version: 1; runId: string; mode: Mode; at: number; reason: StopReason; step?: number;
   files: { path: string; state: RunChange['state'] | 'referenced'; version?: string | null }[];
-  commands: { command: string; status: string; exitCode?: number; timedOut?: boolean }[];
+  commands: { id?: string; background?: boolean; command: string; status: string; exitCode?: number; timedOut?: boolean }[];
   issues: string[]; notes: string[];
   omitted: { files: number; commands: number; issues: number; notes: number };
 }

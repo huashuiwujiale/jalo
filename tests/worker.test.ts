@@ -117,3 +117,47 @@ test('worker sends incremental complete groups, waits for checkpoints and retain
     await fs.rm(home, { recursive: true, force: true });
   }
 });
+
+test('worker bridges approved PTY launches and command status replies without spawning locally', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'jalo-managed-worker-'));
+  const Module = require('node:module'), originalLoad = Module._load, originalPort = (process as any).parentPort;
+  const port = new EventEmitter() as any, events: any[] = [];
+  const commandId = 'cb5091bf-a040-44df-9192-99579ebc3b15';
+  const replies = [
+    { message: { role: 'assistant', content: null, tool_calls: [call('probe', 'capability_check', { ok: true })] }, finishReason: 'tool_calls' },
+    { message: { role: 'assistant', content: null, tool_calls: [call('start', 'run_command', { command: 'fixture-only', background: true })] }, finishReason: 'tool_calls' },
+    { message: { role: 'assistant', content: null, tool_calls: [call('status', 'command_status', { commandId })] }, finishReason: 'tool_calls' },
+    { message: { role: 'assistant', content: '后台命令仍在运行。' }, finishReason: 'stop' },
+  ];
+  class Provider {
+    async list() { return [{ key: 'mock', toolUse: true, maxContext: 16384, instances: [{ id: 'mock', contextLength: 16384 }] }]; }
+    async generate() { return replies.shift(); }
+  }
+  let finish: (value: any) => void;
+  const done = new Promise<any>(resolve => { finish = resolve; }), timeout = setTimeout(() => finish(undefined), 5000);
+  port.postMessage = (event: any) => {
+    events.push(event);
+    if (event.type === 'approval') queueMicrotask(() => port.emit('message', { data: { type: 'approve', id: event.approval.id, allow: true } }));
+    if (event.type === 'managed-command' || event.type === 'command-status') queueMicrotask(() => port.emit('message', { data: { type: 'command-result', id: event.approval?.id || event.id, result: event.type === 'managed-command' ? `后台启动 ${commandId}` : 'running' } }));
+    if (event.type === 'done') finish(event);
+  };
+  Module._load = function(id: string, ...args: any[]) {
+    if (id === './providers') return { createProvider: () => new Provider() };
+    if (id === './provider') return { ...originalLoad.call(this, id, ...args), LMStudioProvider: Provider };
+    return originalLoad.call(this, id, ...args);
+  };
+  (process as any).parentPort = port;
+  try {
+    require('../engine/worker.ts');
+    port.emit('message', { data: { type: 'start', root: home, backupDir: path.join(home, 'backup'), settings: { ...defaults, model: 'mock' }, input: { projectId: 'p', model: 'mock', messages: [{ role: 'user', content: '启动后台命令并核对状态' }], changes: [], run: { id: 'r', mode: 'execute', references: [] } } } });
+    const result = await done; assert.equal(result?.status, 'completed');
+    assert.equal(events.filter(e => e.type === 'approval').length, 1);
+    assert.equal(events.filter(e => e.type === 'managed-command').length, 1);
+    assert.equal(events.filter(e => e.type === 'command-status').length, 1);
+    assert.ok(!events.some(e => e.type === 'process'));
+  } finally {
+    clearTimeout(timeout); Module._load = originalLoad; (process as any).parentPort = originalPort;
+    port.removeAllListeners(); delete require.cache[require.resolve('../engine/worker.ts')];
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});

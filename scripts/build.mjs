@@ -1,3 +1,4 @@
+import './prepare-pty.mjs';
 import { build as bundle } from 'esbuild';
 import { build as frontend } from 'vite';
 import { mkdir, copyFile } from 'node:fs/promises';
