@@ -1,5 +1,6 @@
 import { z } from 'zod';
 export const settingsSchema = z.object({
+  provider: z.enum(['lmstudio', 'ollama']).default('lmstudio'),
   baseUrl: z.string().url().refine(value => {
     const u = new URL(value);
     return ['http:', 'https:'].includes(u.protocol) && !u.username && !u.password && !u.search && !u.hash && (u.pathname === '/' || u.pathname === '');

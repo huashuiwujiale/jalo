@@ -8,9 +8,10 @@ export interface ModelProvider {
   unload(instance: string, signal?: AbortSignal): Promise<void>;
   generate(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, delta: (text: string) => void, forceTool?: string, activity?: () => void): Promise<Completion>;
 }
-export class LMStudioProvider implements ModelProvider {
+export class HttpModelProvider {
   constructor(public settings: Settings, private fetcher: typeof fetch = fetch) {}
-  private async request(path: string, body?: unknown, signal?: AbortSignal, timeout = 30000) {
+  protected get serviceName() { return 'LM Studio'; }
+  protected async request(path: string, body?: unknown, signal?: AbortSignal, timeout = 30000) {
     const timed = AbortSignal.timeout(timeout);
     const combined = signal ? AbortSignal.any([signal, timed]) : timed;
     try {
@@ -22,17 +23,19 @@ export class LMStudioProvider implements ModelProvider {
       if (!response.ok) {
         let detail = (await response.text()).slice(0, 1500);
         if (this.settings.token) detail = detail.split(this.settings.token).join('[令牌已隐藏]');
-        const hint = response.status === 401 ? '访问令牌不正确。' : response.status === 404 ? '请使用提供 /api/v1/models 的 LM Studio 版本。' : '';
-        throw new Error(`LM Studio HTTP ${response.status}：${hint}${detail}`);
+        const hint = response.status === 401 ? '访问令牌不正确。' : response.status === 404 ? (this.serviceName === 'LM Studio' ? '请使用提供 /api/v1/models 的 LM Studio 版本。' : '请检查 Ollama 服务地址、模型名称及版本。') : '';
+        throw new Error(`${this.serviceName} HTTP ${response.status}：${hint}${detail}`);
       }
       return response;
     } catch (error) {
       if (signal?.aborted) throw new Error('任务已停止');
-      if (timed.aborted) throw new Error('LM Studio 请求超时，请检查模型或降低上下文长度');
-      if (error instanceof TypeError) throw new Error('无法连接 LM Studio，请启动本地服务器并检查服务地址');
+      if (timed.aborted) throw new Error(`${this.serviceName} 请求超时，请检查模型或降低上下文长度`);
+      if (error instanceof TypeError) throw new Error(`无法连接 ${this.serviceName}，请启动本地服务器并检查服务地址`);
       throw error;
     }
   }
+}
+export class LMStudioProvider extends HttpModelProvider implements ModelProvider {
   async list(signal?: AbortSignal): Promise<LocalModel[]> {
     const data = await (await this.request('/api/v1/models', undefined, signal)).json();
     if (!Array.isArray(data.models)) throw new Error('模型列表格式不兼容，需要 LM Studio v1 REST API');

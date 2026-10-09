@@ -6,7 +6,7 @@
 
 Jalo 是佳乐（Jiale）发起的本地编程助手，名字取自「佳乐」的音感，也呼应 Local。
 
-Jalo 是一个面向 macOS 的本地编程助手。它连接 LM Studio 中运行的模型，让模型在你选择的项目里读取代码、生成修改，并在每次终端命令执行前征求确认。
+Jalo 是一个面向 macOS 的本地编程助手。它连接 LM Studio 或 Ollama 中运行的本地模型，让模型在你选择的项目里读取代码、生成修改，并在每次终端命令执行前征求确认。
 
 > 当前支持开发运行及本机生成的 macOS ARM64 DMG。安装包使用本地临时签名，未做 Apple Developer ID 签名或公证，尚未提供面向公众的正式发行包。模型能力会直接影响任务完成质量；Jalo 负责限制权限、验证写入并如实记录结果，不保证每个本地模型都能完成复杂改动。
 
@@ -19,9 +19,9 @@ Jalo 是一个面向 macOS 的本地编程助手。它连接 LM Studio 中运行
 1. 退出正在运行的 Jalo 开发版或安装版。
 2. 打开 DMG，把 **Jalo** 拖入 **Applications（应用程序）**。
 3. 推出安装镜像，从“应用程序”启动 Jalo。
-4. 在 LM Studio 启动本地服务器，然后按下方步骤连接模型。
+4. 启动 LM Studio 或 Ollama，然后按下方步骤连接模型。
 
-安装版包含界面、任务引擎与运行时，不需要另行运行 Node.js 或 Vite；模型推理仍由 LM Studio 提供。
+安装版包含界面、任务引擎与运行时，不需要另行运行 Node.js 或 Vite；模型推理由配置的 LM Studio 或 Ollama 提供。
 
 ### 替换安装包
 
@@ -52,7 +52,7 @@ npm run dist:mac
 
 ## 启动
 
-需要 **Node.js 22.14+**、npm，以及提供 `/api/v1/models` 的 LM Studio 版本。
+需要 **Node.js 22.14+**、npm，以及提供 `/api/v1/models` 的 LM Studio 版本或支持工具调用、`/api/ps` 上下文信息的 Ollama 版本。
 
 ```sh
 git clone https://github.com/huashuiwujiale/jalo.git
@@ -67,7 +67,7 @@ npm run dev
 如果项目已有 `node_modules`，可直接 `npm run dev`。启动脚本会启动本地 Vite 服务及 Electron 窗口；没有编译、打包步骤。开发服务使用 `127.0.0.1:5173`，端口被占用时明确报错。
 
 1. 在 LM Studio 中下载支持工具调用的模型，启动 Developer 页的本地服务器。
-2. 打开“模型与设置”，填写地址（默认 `http://127.0.0.1:1234`）及可选令牌，保存并检测连接。
+2. 打开“模型与设置”，选择 LM Studio，填写地址（默认 `http://127.0.0.1:1234`）及可选令牌，保存并检测连接。
 3. 选择默认模型并保存。可手动加载/卸载；开始任务时也会加载尚未加载的模型。
 
 聊天输入框底部也可以切换模型，每个聊天独立记忆选择，重启后恢复；选择“使用默认模型”会沿用设置中的默认模型。选择本身不会加载模型，发送时才自动加载。切换保留当前聊天历史，运行中或排队中的任务保持提交时的模型；轮次结果会记录本轮模型。
@@ -75,12 +75,27 @@ npm run dev
 5. 每条终端命令都展示完整内容、工作目录和超时时间。选择允许或拒绝。
 6. 右侧查看文件差异或终端输出。任务结束后可补充要求；新建任务可进入队列。
 
+### 使用 Ollama
+
+1. 启动 Ollama，先下载支持工具调用的本地模型，例如 `ollama pull qwen3-coder:30b`（需要足够内存）。
+2. 在“模型与设置”选择 **Ollama**，默认地址为 `http://127.0.0.1:11434`，本地服务通常无需令牌。切换服务会清空默认模型和令牌，请保存并检测连接后重新选择模型。
+3. 支持查看工具能力、已加载状态及手动加载/卸载，也可从聊天菜单选模型，发送时自动加载；只列出本地语言模型，不接入 Ollama 云模型。
+4. 使用原生流式聊天接口，传递上下文、输出上限和温度；已加载模型沿用实际上下文，需要扩大时先卸载再加载。Ollama 按自身调度策略管理内存，Jalo 不主动卸载其他模型。
+
+模型服务为全局设置，任务或实测期间不能切换服务。聊天内保存的模型名称会在当前服务中校验；切换服务后原模型不存在时，需要重新选择，不会自动替换。旧配置继续使用 LM Studio。
+
+可在临时样例中运行真实验收：
+
+```sh
+JALO_PROVIDER=ollama OLLAMA_MODEL=qwen3-coder:30b npm run test:live
+```
+
 ## 核心能力
 
 - 中文三栏界面：项目和历史任务、对话与执行过程、文件差异和终端输出。
 - 助手回复、流式回复和保存计划支持 Markdown：标题、列表、引用、行内代码、代码块、表格、删除线和只读任务列表。代码块显示语言并提供复制，长代码与表格可独立滚动；复制与打开链接失败时在原位置提示，可再次点击重试。用户要求、工具日志、终端输出和差异继续按原文展示，保存与传给模型的内容不因渲染而改变。
 - Markdown 网页链接由用户点击后在系统浏览器打开，只允许不含账号密码的 HTTP/HTTPS URL；相对路径、文件和应用协议显示为文字。原始 HTML 不执行，Markdown 图片只显示替代文本，不自动读取本地图片或请求远程图片；代码块复制只复制代码正文，不执行内容。
-- LM Studio 原生 v1 模型管理，OpenAI 兼容 Chat Completions 流式推理。
+- LM Studio 原生 v1 模型管理与兼容 Chat Completions 流式推理；Ollama 原生模型列表、加载/卸载和流式工具调用。
 - 任务开始时真实检测结构化工具调用，不把普通聊天文本当作可执行命令。
 - 独立 utilityProcess 任务进程；单任务运行、FIFO 排队，模型与配置在队列期间锁定。
 - 目录浏览、文本/文件名搜索、分页读取、创建/替换文件、精确文本补丁、命令确认及差异展示。
@@ -158,7 +173,7 @@ JALO_MODEL=qwen/qwen3-1.7b node --import tsx scripts/reliability-live.ts
 - 访问令牌用 Electron `safeStorage` 加密后入库；不可用时拒绝保存令牌。
 - 数据库保存任务上下文、工具日志和文件原文，请按本地源代码数据妥善管理。当前开发版不会自动清理历史数据。
 - 界面进程启用 sandbox、contextIsolation，禁用 Node 集成；只暴露固定 IPC 方法，不开放任意命令或文件系统接口。
-- **终端命令不是系统沙箱**，经确认后以当前用户身份执行，可能影响项目外资源。命令不会继承配置中的 LM Studio 访问令牌。
+- **终端命令不是系统沙箱**，经确认后以当前用户身份执行，可能影响项目外资源。命令不会继承配置中的模型服务访问令牌。
 - 直接文件工具限制在所选项目内，拒绝符号链接、路径越界和 `.git` 内部访问，写入硬链接文件也会被拒绝。这些应用层检查不等同于对抗同一用户恶意并发文件替换的内核沙箱。
 - 文件差异仅追踪本任务通过文件工具产生的修改，不包含原有 Git 改动或终端造成的文件修改。若本任务已改过的文件又被外部修改，会要求在新任务中继续，避免混入他人的差异。
 - 默认只连接本机。若自行修改服务地址，项目上下文会发送到该地址；不会自动回退到任何云端模型。
@@ -216,7 +231,7 @@ env -u ELECTRON_RUN_AS_NODE ./node_modules/electron/dist/Electron.app/Contents/M
 
 SQLite 使用 Node.js 22.14+ / Electron 内置的 `node:sqlite`，无需额外原生模块重编译。主进程作为单写入者，以 WAL/FULL 事务持久化；`sql.js` 仅作为开发测试依赖，用于验证旧数据库兼容迁移。当前不面向多进程并发写库。
 
-接口依据：[LM Studio 模型管理](https://lmstudio.ai/docs/developer/rest)、[工具调用](https://lmstudio.ai/docs/developer/openai-compat/tools)、[Electron utilityProcess](https://www.electronjs.org/docs/latest/api/utility-process)。
+接口依据：[Ollama API](https://docs.ollama.com/api)、[Ollama 工具调用](https://docs.ollama.com/capabilities/tool-calling)、[LM Studio 模型管理](https://lmstudio.ai/docs/developer/rest)、[工具调用](https://lmstudio.ai/docs/developer/openai-compat/tools)、[Electron utilityProcess](https://www.electronjs.org/docs/latest/api/utility-process)。
 
 ## 项目标识
 

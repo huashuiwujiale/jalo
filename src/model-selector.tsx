@@ -101,7 +101,7 @@ export function ModelSelector({ api, value, defaultModel, service, disabled, onC
         {pending && <p>正在获取模型列表…</p>}
         {problem && <p role="alert">{problem}</p>}
         {error && <p role="alert">{error}<button type="button" disabled={pending} onClick={() => void refresh()}>重试</button></p>}
-        {!pending && !error && models?.length === 0 && <p>暂无语言模型，请在 LM Studio 中下载模型并启动服务器。</p>}
+        {!pending && !error && models?.length === 0 && <p>暂无语言模型，请在当前模型服务中下载模型并启动服务器。</p>}
       </div>
       <footer><button type="button" onClick={() => { close(); settings(); }}><Settings2 size={14}/>模型与设置</button><span>↑ ↓ 选择 · Enter 确认</span></footer>
     </section>, document.body)}

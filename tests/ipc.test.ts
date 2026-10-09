@@ -382,8 +382,8 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await new Promise(r=>setTimeout(r,20));assert.equal(workers.length,countBeforeStop);assert.equal((await invoke('task:detail',followTask)).status,'cancelled');assert.equal((await invoke('task:detail',followTask)).followups.length,1);
 
 
-    // Per-chat overrides work even without a default and keep their own queued configuration.
-    await invoke('settings:save',{...defaults,model:''});
+    // Ollama per-chat overrides retain provider and endpoint in queued configuration.
+    await invoke('settings:save',{...defaults,provider:'ollama',baseUrl:'http://127.0.0.1:11434',model:''});
     await assert.rejects(invoke('task:submit',{projectId:project.id,prompt:'no model'}),/选择模型/);
     await invoke('task:submit',{projectId:project.id,taskId:gapId,prompt:'continue with A',model:'model-a'});
     const modelAWorker=workers.at(-1);
@@ -398,6 +398,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await new Promise(r=>setImmediate(r));
     const modelAStart=modelAWorker.sent.find((m:any)=>m.type==='start');
     assert.equal(modelAStart.input.model,'model-a');assert.equal(modelAStart.settings.model,'model-a');
+    assert.equal(modelAStart.settings.provider,'ollama');assert.equal(modelAStart.settings.baseUrl,'http://127.0.0.1:11434');
     assert.ok(modelAStart.input.messages.some((m:any)=>m.content==='message protocol gap'),'switching models preserves earlier conversation');
     const modelATask=(await snapshot()).tasks.find((t:any)=>t.id===gapId);
     assert.equal(modelATask.runs[0].model,'mock');assert.equal(modelATask.runs.at(-1).model,'model-a');
@@ -406,6 +407,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await new Promise(r=>setImmediate(r));
     const modelBWorker=workers.at(-1), modelBStart=modelBWorker.sent.find((m:any)=>m.type==='start');
     assert.equal(modelBStart.input.model,'model-b');assert.equal(modelBStart.settings.model,'model-b');
+    assert.equal(modelBStart.settings.provider,'ollama');assert.equal(modelBStart.settings.baseUrl,'http://127.0.0.1:11434');
     modelBWorker.emit('message',{type:'done',runId:queued.currentRunId,status:'completed'});
     // Existing callers without an override continue to use the global default.
     await invoke('settings:save',{...defaults,model:'mock'});

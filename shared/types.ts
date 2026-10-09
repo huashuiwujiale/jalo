@@ -1,10 +1,12 @@
 export type Status = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 export const busyStatuses: Status[] = ['queued', 'running', 'waiting'];
 export interface Settings {
+  provider?: 'lmstudio' | 'ollama';
   baseUrl: string; token: string; model: string; temperature: number;
   contextLength: number; maxTokens: number; maxSteps: number; commandTimeout: number;
 }
 export const defaults: Settings = {
+  provider: 'lmstudio',
   baseUrl: 'http://127.0.0.1:1234', token: '', model: '', temperature: 0.2,
   contextLength: 16384, maxTokens: 2048, maxSteps: 30, commandTimeout: 60,
 };

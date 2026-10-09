@@ -32,7 +32,7 @@ test('worker resolves the chosen model at send time, loads only when needed and 
       let resolveDone: () => void;
       const done = new Promise<void>(resolve => { resolveDone = resolve; });
       port.postMessage = (event: any) => { if(event.type === 'done') { result=event; resolveDone(); } };
-      Module._load = function(id: string, ...args: any[]) { return id === './provider' ? { LMStudioProvider:Provider } : originalLoad.call(this,id,...args); };
+      Module._load = function(id: string, ...args: any[]) { return id === './providers' ? { createProvider:(settings: Settings) => new Provider(settings) } : originalLoad.call(this,id,...args); };
       (process as any).parentPort=port;
       delete require.cache[require.resolve('../engine/worker.ts')]; require('../engine/worker.ts');
       const timer=setTimeout(()=>resolveDone(),5000);
@@ -96,7 +96,7 @@ test('worker sends incremental complete groups, waits for checkpoints and retain
       if (event.type === 'done') resolveDone(event);
     } catch (error) { rejectDone(error); }
   };
-  Module._load = function(id: string, ...args: any[]) { if (id === './provider') return { LMStudioProvider: Provider }; return originalLoad.call(this, id, ...args); };
+  Module._load = function(id: string, ...args: any[]) { if (id === './providers') return { createProvider:() => new Provider() }; return originalLoad.call(this, id, ...args); };
   (process as any).parentPort = port;
   try {
     await fs.writeFile(path.join(home, 'a.txt'), 'old');

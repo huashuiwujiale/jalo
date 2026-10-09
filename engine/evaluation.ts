@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { ToolRegistry } from './tools';
 import { TaskRunner } from './runner';
 import { checkSyntax } from './syntax';
-import { LMStudioProvider, type ModelProvider } from './provider';
+import type { ModelProvider } from './provider';
+import { createProvider } from './providers';
 import { endEvaluation, type EvaluationReport } from '../shared/evaluation';
 import type { EngineEvent, Settings } from '../shared/types';
 
@@ -32,7 +33,7 @@ async function inventory(root: string, relative = ''): Promise<Record<string, st
 const normalizeBlankLines = (text: string) => text.replace(/\r\n/g, '\n').replace(/^[ \t]*\n/gm, '').trim();
 
 /** home is a newly-created private temporary directory, never a user's project. */
-export async function runEvaluation(report: EvaluationReport, saved: Settings, home: string, signal: AbortSignal, update: (report: EvaluationReport) => void, providerFactory: (settings: Settings) => ModelProvider = s => new LMStudioProvider(s)) {
+export async function runEvaluation(report: EvaluationReport, saved: Settings, home: string, signal: AbortSignal, update: (report: EvaluationReport) => void, providerFactory: (settings: Settings) => ModelProvider = createProvider) {
   const config = { ...saved, ...report.parameters };
   const safeError = (error: unknown) => {
     let text = error instanceof Error ? error.message : String(error);
@@ -45,7 +46,7 @@ export async function runEvaluation(report: EvaluationReport, saved: Settings, h
     const model = models.find(m => m.key === config.model || m.instances.some(i => i.id === config.model));
     const instance = model?.instances.find(i => i.id === config.model) || model?.instances[0];
     if (!instance) throw new Error('当前模型尚未加载。请先加载选定模型，再开始实测；不会自动加载或切换模型。');
-    if (model?.toolUse === false) throw new Error('LM Studio 标记此模型不支持工具调用');
+    if (model?.toolUse === false) throw new Error('模型服务标记此模型不支持工具调用');
     config.model = instance.id;
     config.contextLength = Math.min(config.contextLength, instance.contextLength, model!.maxContext);
     report.instance = instance.id; report.parameters.contextLength = config.contextLength; update(report);

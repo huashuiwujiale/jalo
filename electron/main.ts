@@ -19,7 +19,7 @@ import { SessionStore } from './session';
 import { viewSchema } from '../shared/session';
 import { EvaluationController } from './evaluation';
 import { DiagnosticLog, diagnosticReport, errorCategory, saveDiagnosticReport } from './diagnostics';
-import { LMStudioProvider } from '../engine/provider';
+import { createProvider } from '../engine/providers';
 import { settingsSchema, submitSchema } from '../shared/validation';
 import { linkedPlanContext, pageTaskEvents } from '../shared/task-history';
 import { changeView, searchTaskIds, taskDetail, taskSummary } from '../shared/task-wire';
@@ -396,17 +396,17 @@ function registerApi() {
     }
     store.putSettings(value); broadcast();
   });
-  register('models:list', () => new LMStudioProvider(settings()).list());
+  register('models:list', () => createProvider(settings()).list());
   register('models:load', async (key: unknown) => {
     idleRequired(); const modelKey = z.string().min(1).max(300).parse(key); modelOperation = true;
-    try { const config = settings(), provider = new LMStudioProvider(config); const model = (await provider.list()).find(m => m.key === modelKey);
+    try { const config = settings(), provider = createProvider(config); const model = (await provider.list()).find(m => m.key === modelKey);
       if (!model) throw new Error('模型不存在');
       if (!model.instances.length) await provider.load(modelKey, Math.min(config.contextLength, model.maxContext));
     } finally { modelOperation = false; broadcast(); pump(); }
   });
   register('models:unload', async (id: unknown) => {
     idleRequired(); const instanceId = z.string().min(1).max(300).parse(id); modelOperation = true;
-    try { await new LMStudioProvider(settings()).unload(instanceId); } finally { modelOperation = false; broadcast(); pump(); }
+    try { await createProvider(settings()).unload(instanceId); } finally { modelOperation = false; broadcast(); pump(); }
   });
   const projectById = (id: string) => { const p = store.projects().find(p => p.id === id); if (!p) throw new Error('项目不存在'); return p; };
   register('files:search', async (raw: unknown) => { const v = z.object({ projectId: uuid, query: z.string().max(200) }).strict().parse(raw); return searchFiles(projectById(v.projectId).path, v.query); });

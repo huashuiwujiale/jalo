@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Approval, EngineEvent, Settings } from '../shared/types';
 import { MessagePatchSender, type WorkerInput } from '../shared/worker-wire';
-import { LMStudioProvider } from './provider';
+import { createProvider } from './providers';
 import { ToolRegistry } from './tools';
 import { validateContinuationFiles } from './continuation';
 import { gitPatch } from './git-review';
@@ -56,12 +56,12 @@ port.on('message', async ({ data }: any) => {
     await captureReferences({ id: input.projectId, name: '', path: root }, run.references);
     if (run.gitReview) await gitPatch(root, run.gitReview.path, run.gitReview.version);
     if (run.continuationFiles) await validateContinuationFiles(root, run.continuationFiles);
-    const provider = new LMStudioProvider(settings);
+    const provider = createProvider(settings);
     emit({ type: 'progress', progress: { phase: 'connecting', since: Date.now() } });
     const models = await provider.list(controller.signal);
     const model = models.find(m => m.key === input.model || m.instances.some(i => i.id === input.model));
     if (!model) throw new Error('选择的模型不存在，请刷新模型列表');
-    if (model.toolUse === false) throw new Error('LM Studio 标记此模型未针对工具调用训练，请选择其他模型');
+    if (model.toolUse === false) throw new Error('模型服务标记此模型不支持工具调用，请选择其他模型');
     settings.contextLength = Math.min(settings.contextLength, model.maxContext);
     const instance = model.instances.find(i => i.id === input.model) || model.instances[0];
     if (instance) {
