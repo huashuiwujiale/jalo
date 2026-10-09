@@ -17,7 +17,7 @@ edit_file 的 oldText 是精确原文，不是正则表达式，不得添加正�
 项目技术栈、依赖版本和启动命令必须以实际读取的配置文件为依据。不能仅根据目录名推断。没有读取过的文件不能声称已阅读；缺少证据时明确说明未知。
 直接文件工具受项目路径限制，命令不是系统沙箱。不要读取无关敏感信息。
 仅使用文件工具进行代码修改，以确保修改记录可追踪。不要用终端命令修改源文件。
-工具 diff 仅记录本次任务通过文件工具产生的改动，不代表完整 Git 差异。`;
+show_changes 的差异范围以当前模式和捕获目标为准，不能据此推断其他 Git 改动。`;
 const probe: ToolDefinition = { type: 'function', function: { name: 'capability_check', description: '验证工具调用结构，必须传入 ok=true，不执行系统操作。', parameters: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } } };
 export class TaskRunner {
   constructor(private provider: ModelProvider, private tools: ToolRegistry, private settings: Settings, private emit: (event: EngineEvent) => void, private signal: AbortSignal, private takeFollowups: () => Followup[] = () => []) {}

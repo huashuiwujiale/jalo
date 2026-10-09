@@ -1,8 +1,8 @@
-import type { Change, EngineEvent, FileReference, Message, Mode, Task, Followup } from './types';
+import type { Change, EngineEvent, FileReference, Message, Mode, Task, Followup, GitReview } from './types';
 
 export interface WorkerInput {
   projectId: string; model: string;
-  run: { id: string; mode: Mode; references: FileReference[] };
+  run: { id: string; mode: Mode; references: FileReference[]; gitReview?: GitReview };
   followups?: Followup[];
   messages: Message[]; changes: Change[]; reviewChanges?: Pick<Change, 'path' | 'patch'>[];
 }
@@ -18,9 +18,9 @@ export function workerInput(task: Task): { input: WorkerInput; archiveLength: nu
   const archiveLength = run.planRunId || run.mode === 'review' ? Math.max(0, task.messages.length - 1) : 0;
   return { archiveLength, input: {
     projectId: task.projectId, model: task.model, followups: task.followups?.filter(f => f.kind === 'steer'),
-    run: { id: run.id, mode: run.mode, references: run.references.map(({ content: _content, ...reference }) => reference) },
+    run: { id: run.id, mode: run.mode, references: run.references.map(({ content: _content, ...reference }) => reference), ...(run.gitReview ? { gitReview: { path: run.gitReview.path, version: run.gitReview.version } } : {}) },
     messages: task.messages.slice(archiveLength), changes: run.mode === 'review' ? [] : task.changes,
-    ...(run.mode === 'review' ? { reviewChanges: task.runs?.find(r => r.id === run.reviewRunId)?.changes
+    ...(run.mode === 'review' ? { reviewChanges: run.gitReview ? [{ path: run.gitReview.path, patch: run.gitReview.patch }] : task.runs?.find(r => r.id === run.reviewRunId)?.changes
       .filter(c => c.state === 'written').map(({ path, patch }) => ({ path, patch })) || [] } : {}),
   } };
 }

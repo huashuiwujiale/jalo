@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('localCode', Object.freeze({
   taskPage: input => ipcRenderer.invoke('tasks:page', input),
   searchTasks: input => ipcRenderer.invoke('tasks:search', input),
   planText: (taskId, runId) => ipcRenderer.invoke('runs:plan', { taskId, runId }),
+  gitStatus: projectId => ipcRenderer.invoke('git:status', projectId),
+  gitPatch: input => ipcRenderer.invoke('git:patch', input),
   commandOutput: input => ipcRenderer.invoke('command:output', input),
   changePatch: input => ipcRenderer.invoke('changes:patch', input),
   saveSettings: settings => ipcRenderer.invoke('settings:save', settings),

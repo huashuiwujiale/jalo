@@ -2,9 +2,10 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ArrowUp, ArrowRight, Check, ChevronDown, ChevronRight, Code2, Cpu, FileCode2, Folder, FolderPlus, GitBranch, HardDrive, LoaderCircle, MessageSquare, Plus, RefreshCw, Settings2, ShieldCheck, Square, Terminal, X, Zap } from 'lucide-react';
 import { FilePicker, RunPanel, RunResult, modeLabels } from './reliability';
-import type { Mode, FileReference, Api, LocalModel, Settings, Snapshot, TaskSummary, Project } from '../shared/types';
+import type { Mode, FileReference, Api, LocalModel, Settings, Snapshot, TaskSummary, Project, GitReview } from '../shared/types';
 import { busyStatuses, defaults } from '../shared/types';
 import './style.css';
+import { GitPanel } from './git-panel';
 import { CommandPanel } from './command-panel';
 import { TimelineRows } from './timeline-rows';
 import { StreamingReply } from './streaming-reply';
@@ -37,7 +38,9 @@ function App() {
   const [model, setModel] = useState('');
   const [modelValidation, setModelValidation] = useState<ModelValidation>();
   const [references, setReferences] = useState<FileReference[]>([]);
-  const [picker, setPicker] = useState<{ path?: string }>();
+  const [picker, setPicker] = useState<{ path?: string; line?: number }>();
+  const [gitReview, setGitReview] = useState<GitReview>();
+  const [changeSource, setChangeSource] = useState<'run' | 'git'>('run');
   const [runId, setRunId] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [removingProject, setRemovingProject] = useState<Project>();
@@ -109,6 +112,7 @@ function App() {
   const effectiveModel = model || state.settings.model;
   const modelError = modelValidation?.service === modelService && modelValidation.model === effectiveModel ? modelValidation.error : '';
   const run = task?.runs?.find(r => r.id === runId) || task?.runs?.at(-1);
+  const reviewTarget = gitReview || (mode === 'review' ? run?.gitReview : undefined);
   const invalidReferences = references.some(r => r.projectId !== projectId);
   const projectBusy = state.tasks.some(t => t.projectId === projectId && busyStatuses.includes(t.status));
   function captureCurrent() {
@@ -139,7 +143,7 @@ function App() {
     currentView.current = view; pendingPosition.current = view.scroll;
     expanded.current = new Set(view.scroll.expanded);
     expandedGroups.current.clear();
-    setProjectId(view.projectId); setTaskId(view.taskId); setPrompt(view.prompt); setMode(view.mode); setModel(view.model ?? ''); setModelValidation(undefined); setReferences(view.references);
+    setProjectId(view.projectId); setTaskId(view.taskId); setPrompt(view.prompt); setMode(view.mode); setModel(view.model ?? ''); setModelValidation(undefined); setReferences(view.references); setGitReview(view.gitReview);
     setRunId(view.runId); setTab(view.tab); setPicker(undefined); setSelectedFile(''); setError('');
     setViewRevision(value => value + 1);
   }
@@ -170,9 +174,9 @@ function App() {
   }, [sessionReady, viewRevision, history.restoring, history.loading, history.events, task?.id]);
   useLayoutEffect(() => {
     if (!sessionReady) return;
-    currentView.current = { projectId,taskId,prompt,mode,model,references,runId,tab,scroll:pendingPosition.current || currentView.current.scroll };
+    currentView.current = { projectId,taskId,prompt,mode,model,references,gitReview,runId,tab,scroll:pendingPosition.current || currentView.current.scroll };
     persistView(currentView.current);
-  }, [sessionReady,viewRevision,projectId,taskId,prompt,mode,model,references,runId,tab]);
+  }, [sessionReady,viewRevision,projectId,taskId,prompt,mode,model,references,gitReview,runId,tab]);
   useEffect(() => {
     if (!sessionReady) return;
     const flush = () => {
@@ -223,8 +227,8 @@ function App() {
     setSending(true); setError('');
     const submitted = { ...currentView.current };
     try {
-      const id = await api.submit({ projectId, model: effectiveModel, prompt: planRunId ? '按关联计划执行，先重新读取文件，再完成修改和核验。' : prompt, mode: planRunId ? 'execute' : mode, references: planRunId ? [] : references, ...(planRunId ? { planRunId } : {}), ...(mode === 'review' && !planRunId && run ? { reviewRunId: run.id } : {}), ...(taskId ? { taskId } : {}) });
-      const next: SessionView = { ...submitted, taskId:id, runId:'', mode:planRunId ? 'execute' : mode, prompt:planRunId ? submitted.prompt : '', references:planRunId ? submitted.references : [], scroll:emptyView(projectId).scroll };
+      const id = await api.submit({ projectId, model: effectiveModel, prompt: planRunId ? '按关联计划执行，先重新读取文件，再完成修改和核验。' : prompt, mode: planRunId ? 'execute' : mode, references: planRunId ? [] : references, ...(planRunId ? { planRunId } : {}), ...(mode === 'review' && !planRunId ? reviewTarget ? { gitReview: reviewTarget } : run ? { reviewRunId: run.id } : {} : {}), ...(taskId ? { taskId } : {}) });
+      const next: SessionView = { ...submitted, taskId:id, runId:'', mode:planRunId ? 'execute' : mode, prompt:planRunId ? submitted.prompt : '', references:planRunId ? submitted.references : [], gitReview:undefined, scroll:emptyView(projectId).scroll };
       if(!submitted.taskId)persistView({...next,taskId:'',model:''});
       saver.current!.flush(); openView(next,false);
     } catch (e) { fail(e); }
@@ -279,7 +283,7 @@ function App() {
         {task && <TaskProgress task={task}/>}
         <ContextMeter usage={run?.contextUsage}/>
         {task?.approval && <div className="approval"><div><ShieldCheck size={17}/><strong>需要确认终端命令</strong><span>{task.approval.timeout}s 超时</span></div><pre>{task.approval.command}</pre><small>工作目录：{task.approval.cwd}<br/>命令以你的系统用户权限运行。</small><footer><button onClick={() => api.approve(task.id, task.approval!.id, false).catch(fail)}>拒绝</button><button className="primary" onClick={() => api.approve(task.id, task.approval!.id, true).catch(fail)}>允许执行<ArrowRight size={14}/></button></footer></div>}
-        <div className="mode-controls"><label>任务模式 <select aria-label="任务模式" value={mode} disabled={sending || composerLocked || isBusy} onChange={e => setMode(e.target.value as Mode)}>{Object.entries(modeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button disabled={!project || sending || referencePending || isBusy || composerLocked || references.length >= 8} onClick={() => setPicker({})}>@ 引用文件</button><small>{mode === 'execute' ? '项目内自动写入，支持安全回退' : mode === 'plan' ? '只读分析，确认计划后执行' : '只审查右侧选定轮次，禁止自动修复'}</small></div>
+        <div className="mode-controls"><label>任务模式 <select aria-label="任务模式" value={mode} disabled={sending || composerLocked || isBusy} onChange={e => { setMode(e.target.value as Mode); setGitReview(undefined); }}>{Object.entries(modeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button disabled={!project || sending || referencePending || isBusy || composerLocked || references.length >= 8} onClick={() => setPicker({})}>@ 引用文件</button><small>{mode === 'execute' ? '项目内自动写入，支持安全回退' : mode === 'plan' ? '只读分析，确认计划后执行' : reviewTarget ? `只读审查 Git 差异：${reviewTarget.path}` : '只审查右侧选定轮次，禁止自动修复'}</small>{reviewTarget && <button onClick={() => { setGitReview(undefined); setMode('execute'); }} disabled={sending || isBusy}>取消 Git 审查</button>}</div>
         {!!references.length && <div className="reference-chips">{references.map((r, i) => <span className={r.projectId !== projectId ? 'invalid' : ''} key={i} title={`${state.projects.find(p => p.id === r.projectId)?.path}/${r.path}`}><button disabled={r.projectId !== projectId || sending} onClick={() => setPicker({ path: r.path })}><FileCode2 size={13}/><span className="reference-name">{referenceName(r.path)}</span>{r.scope === 'file' ? ' · 整个文件' : `:${r.startLine}–${r.endLine}`}{r.projectId !== projectId ? '（项目已切换，引用失效）' : ''}</button><button disabled={sending} aria-label="移除引用" onClick={() => setReferences(references.filter((_, j) => j !== i))}>×</button></span>)}</div>}
         <div className={`composer ${composerLocked ? 'busy' : ''}`}><MentionInput key={`${projectId}:${taskId}`} api={api} project={project} placeholder={task?.archivedAt ? '恢复任务后可继续对话' : isBusy ? '补充文字要求：排队发送或调整当前任务…' : '描述任务，输入 @ 引用文件…'} value={prompt} references={references} disabled={composerLocked || sending} canAdd={!isBusy && references.length < 8} onChange={setPrompt} onChoose={ref=>setReferences(old=>[...old.filter(r=>!(r.projectId===ref.projectId && r.path===ref.path)),ref].slice(0,8))} onPending={setReferencePending} submit={()=>void submit()}/><div className="composer-toolbar"><label className="composer-project" title={project?.path || '选择任务所在项目'}><Folder size={13}/><select aria-label="切换任务项目" value={projectId} disabled={sending || !state.projects.length} onChange={e => chooseProject(e.target.value)}>
           {!projectId && <option value="" disabled>未选择项目</option>}
@@ -289,11 +293,11 @@ function App() {
       </div>
     </main>
     <aside className="inspector"><header><span>任务工作区</span><span className="inspector-counter">{task?.changes.length || 0} 个文件</span></header><div className="inspector-tabs"><button className={tab === 'changes' ? 'active' : ''} onClick={() => setTab('changes')}><GitBranch size={14}/>修改</button><button className={tab === 'terminal' ? 'active' : ''} onClick={() => setTab('terminal')}><Terminal size={14}/>终端</button></div>
-      {tab === 'changes' ? <RunPanel task={task} runId={runId} selectRun={setRunId} locked={projectBusy} fail={fail} preview={path => setPicker({ path })}/> : <div className="terminal-panel"><CommandPanel key={`${taskId}:${runId}`} api={api} task={task} runId={runId}/><div className="terminal-heading"><span className="green-dot"/>zsh <span>只显示本任务输出</span></div>{task && <HistoryControls hasMore={history.hasMore} loading={history.loading} incomplete={task.historyIncomplete} load={() => void history.loadEarlier()}/>}<pre>{history.events.filter(e => e.kind === 'output').map(e => e.text).join('') || '已加载记录中暂无命令输出。\n\n每条命令将在确认后运行。'}</pre><p>终端修改不计入文件工具差异。</p></div>}
+      {tab === 'changes' ? <><div className="run-controls"><select aria-label="改动来源" value={changeSource} onChange={e => setChangeSource(e.target.value as 'run' | 'git')}><option value="run">文件工具修改</option><option value="git">Git 工作区</option></select></div>{changeSource === 'git' ? <GitPanel key={projectId} api={api} project={project} refreshToken={`${taskId}:${selected?.status || ''}`} locked={sending || projectBusy || composerLocked || !!evaluating} preview={(path, line) => setPicker({ path, line })} review={(target, text) => { setGitReview(target); setMode('review'); setPrompt(text); }}/> : <RunPanel task={task} runId={runId} selectRun={setRunId} locked={projectBusy} fail={fail} preview={path => setPicker({ path })}/>}</> : <div className="terminal-panel"><CommandPanel key={`${taskId}:${runId}`} api={api} task={task} runId={runId}/><div className="terminal-heading"><span className="green-dot"/>zsh <span>只显示本任务输出</span></div>{task && <HistoryControls hasMore={history.hasMore} loading={history.loading} incomplete={task.historyIncomplete} load={() => void history.loadEarlier()}/>}<pre>{history.events.filter(e => e.kind === 'output').map(e => e.text).join('') || '已加载记录中暂无命令输出。\n\n每条命令将在确认后运行。'}</pre><p>终端修改不计入文件工具差异。</p></div>}
       <div className="runtime-card"><div><Cpu size={15}/><strong>本地运行环境</strong></div><dl><dt>推理服务</dt><dd>LM Studio</dd><dt>执行引擎</dt><dd>独立进程</dd><dt>任务调度</dt><dd>{state.activeId ? '1 个运行中' : '空闲'}{state.tasks.some(t => t.status === 'queued') ? ` · ${state.tasks.filter(t => t.status === 'queued').length} 个排队` : ''}</dd></dl></div>
     </aside>
     {error && <div className="toast" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={() => setError('')}><X size={16}/></button></div>}
-    {picker && project && <FilePicker key={project.id} project={project} initialPath={picker.path} initialReference={references.find(r=>r.projectId===project.id && r.path===picker.path)} close={() => setPicker(undefined)} choose={ref => { setReferences(old => [...old.filter(r => !(r.projectId === ref.projectId && r.path === ref.path)), ref].slice(0, 8)); setPicker(undefined); }}/>}
+    {picker && project && <FilePicker key={project.id} project={project} initialPath={picker.path} initialLine={picker.line} initialReference={references.find(r=>r.projectId===project.id && r.path===picker.path)} close={() => setPicker(undefined)} choose={ref => { setReferences(old => [...old.filter(r => !(r.projectId === ref.projectId && r.path === ref.path)), ref].slice(0, 8)); setPicker(undefined); }}/>}
     {settingsOpen && <SettingsDialog state={state} close={() => setSettingsOpen(false)} fail={fail}/>}
     {removingProject && <RemoveProjectDialog project={removingProject} close={() => setRemovingProject(undefined)} fail={fail} removed={() => {
       if (removingProject.id === projectId) { const remaining={...state,projects:state.projects.filter(p=>p.id!==projectId)};openView(restoreView(sessions.current,remaining,{projectId:'',taskId:''})); }

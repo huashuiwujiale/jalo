@@ -49,7 +49,7 @@ export class ToolRegistry {
   private root = '';
   private blocked = new Set<string>();
   mode() { return this.options.mode || 'execute'; }
-  toolDefinitions() { return toolsForMode(this.mode()); }
+  toolDefinitions() { return toolsForMode(this.mode()).map(tool => this.mode() === 'review' && tool.function.name === 'show_changes' ? { ...tool, function: { ...tool.function, description: '查看当前审查目标捕获的实际差异，范围以提供的轮次或 Git 文件为准，不代表整个工作区的最新状态。' } } : tool); }
   private seen = new Map<string, string>();
   private vueTargets = new Map<string, { version: string; selector: string; start: number; end: number }>();
   private readRanges = new Map<string, { start: number; end: number }>();
@@ -210,7 +210,8 @@ export class ToolRegistry {
     } else if (name === 'run_command') {
       result = await this.command(args.command, await this.resolve(args.cwd));
     } else {
-      result = (this.options.reviewChanges || [...this.changes.values()]).map(c => c.patch).join('\n').slice(0, 32000) || '本次任务暂无文件工具修改';
+      const patch = (this.options.reviewChanges || [...this.changes.values()]).map(c => c.patch).join('\n');
+      result = patch.slice(0, 32000) + (patch.length > 32000 ? '\n[差异超过工具输出上限，已截断；请结合捕获的审查目标并读取相关文件继续检查。]' : '') || (this.mode() === 'review' ? '当前审查目标没有差异' : '本次任务暂无文件工具修改');
     }
     if (!result.startsWith('用户拒绝了该命令')) this.successfulTools.add(name);
     return instructions ? `${instructions}\n\n${result}` : result;

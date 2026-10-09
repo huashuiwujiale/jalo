@@ -207,3 +207,12 @@ button:disabled { cursor:not-allowed;opacity:.5; }
 .command-panel pre { white-space:pre-wrap; overflow-wrap:anywhere; }
 .command-panel .command-output { max-height:320px; overflow:auto; }
 .command-controls { display:flex; gap:6px; margin:8px 0; }
+
+.git-panel { min-height:0; overflow:auto; padding:0 12px 12px; }
+.git-controls { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 0; }
+.git-panel .file-list code { white-space:pre; min-width:2ch; }
+.git-diff > div { display:flex; align-items:stretch; }
+.git-diff > div.selected { background:#dceee6; }
+.git-diff .diff-line-number { flex:none; min-width:74px; padding:0 4px; justify-content:space-between; color:#77818b; border-right:1px solid #e4e7eb; font:inherit; }
+.git-diff .diff-line-number span { min-width:3ch; text-align:right; }
+.git-diff .diff-line-text { display:block; text-align:left; justify-content:flex-start; padding:0 4px; white-space:pre; font:inherit; opacity:1; }

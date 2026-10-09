@@ -13,10 +13,10 @@ export function changeView(change: Change): ChangeView {
   return { path: change.path, changed: change.before !== change.after, patchVersion: cached.version };
 }
 export function runView(run: Run): RunView {
-  const { references, changes, planText, ...data } = run;
+  const { references, changes, planText, gitReview, ...data } = run;
   return { ...data, references: references.map(({ content, ...reference }) => reference),
     changes: changes.map(change => ({ ...changeView(change), id: change.id, runId: change.runId, state: change.state, check: change.check, revertedAt: change.revertedAt })),
-    hasPlan: !!planText?.trim() };
+    ...(gitReview ? { gitReview: { path: gitReview.path, version: gitReview.version } } : {}), hasPlan: !!planText?.trim() };
 }
 export function requestTexts(task: Task) {
   let indexed = requests.get(task);

@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import { referenceSchema } from './validation';
+import { referenceSchema, gitReviewSchema } from './validation';
 import type { Project, Task, TaskSummary } from './types';
 const id = z.union([z.string().uuid(), z.literal('')]);
 export const selectionSchema = z.object({ projectId: id, taskId: id }).strict();
 export const scrollSchema = z.object({ top: z.number().finite().min(0).max(1e9), follow: z.boolean(), anchor: z.string().max(200).optional(), offset: z.number().finite().min(-1e7).max(1e7).optional(), expanded: z.array(z.string().max(200)).max(600) }).strict();
-export const viewSchema = selectionSchema.extend({ prompt: z.string().max(100000), mode: z.enum(['execute','plan','review']), model: z.string().max(300).optional(), references: z.array(referenceSchema).max(8), runId: id, tab: z.enum(['changes','terminal']), scroll: scrollSchema }).strict();
+export const viewSchema = selectionSchema.extend({ prompt: z.string().max(100000), mode: z.enum(['execute','plan','review']), model: z.string().max(300).optional(), references: z.array(referenceSchema).max(8), gitReview: gitReviewSchema.optional(), runId: id, tab: z.enum(['changes','terminal']), scroll: scrollSchema }).strict();
 export type SessionView = z.infer<typeof viewSchema>;
 export interface SessionState { version: 1; selected: z.infer<typeof selectionSchema>; projectTasks: Record<string,string>; views: Record<string,SessionView> }
 export const emptySession = (): SessionState => ({ version:1, selected:{projectId:'',taskId:''}, projectTasks:{}, views:{} });
