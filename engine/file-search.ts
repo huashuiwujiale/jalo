@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { directoryRules, ignoredPath, type IgnoreRule } from './search-ignore';
 
 export const searchIgnored = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.venv', 'coverage']);
 export interface SearchAccess { resolve(relative: string): Promise<string> }
@@ -11,14 +12,18 @@ const stamp = (info: Awaited<ReturnType<typeof fs.lstat>>) => `${info.dev}:${inf
 // stopping at its result limit closes that handle and never visits queued folders.
 export async function* walkSearchFiles(access: SearchAccess, directory: string, budget: SearchBudget, signal?: AbortSignal,
   onDirectory?: (full: string) => Promise<void>) {
-  const pending = [directory];
+  let inherited: IgnoreRule[] = [];
+  const ancestors = directory.split(path.sep).filter(part => part && part !== '.');
+  for (let i = 0; i < ancestors.length; i++) inherited = await directoryRules(access, i ? ancestors.slice(0, i).join(path.sep) : '.', inherited, onDirectory);
+  const pending = [{ directory, rules: inherited }];
   for (let i = 0; i < pending.length; i++) {
     signal?.throwIfAborted();
     if (budget.visited >= budget.maxEntries) { budget.truncated = true; return; }
-    let full: string, handle: Awaited<ReturnType<typeof fs.opendir>>;
+    let rules: IgnoreRule[], full: string, handle: Awaited<ReturnType<typeof fs.opendir>>;
     try {
-      full = await access.resolve(pending[i]);
+      full = await access.resolve(pending[i].directory);
       await onDirectory?.(full);
+      rules = await directoryRules(access, pending[i].directory, pending[i].rules, onDirectory);
       handle = await fs.opendir(full);
     } catch (error) {
       signal?.throwIfAborted();
@@ -30,8 +35,9 @@ export async function* walkSearchFiles(access: SearchAccess, directory: string, 
       signal?.throwIfAborted();
       if (++budget.visited > budget.maxEntries) { budget.truncated = true; return; }
       if (entry.isSymbolicLink() || searchIgnored.has(entry.name)) continue;
-      const relative = path.join(pending[i], entry.name);
-      if (entry.isDirectory()) pending.push(relative);
+      const relative = path.join(pending[i].directory, entry.name);
+      if (ignoredPath(rules!, relative, entry.isDirectory())) continue;
+      if (entry.isDirectory()) pending.push({ directory: relative, rules: rules! });
       else if (entry.isFile()) yield relative;
     }
   }
@@ -55,10 +61,18 @@ export class FileNameIndex {
       entry.pending = this.load(entry.index, access).then(index => { entry.index = index; return index; })
         .catch(error => { entry.index = undefined; throw error; }).finally(() => { entry.pending = undefined; });
     }
-    const index = await cached.pending, needle = query.toLowerCase(), paths: string[] = [];
+    const index = await cached.pending, tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean), paths: string[] = [];
+    const extensions = tokens.filter(t => t.startsWith('ext:')).map(t => t.slice(4).replace(/^\./, ''));
+    const directories = tokens.filter(t => t.startsWith('in:')).map(t => t.slice(3).replace(/\/$/, ''));
+    const words = tokens.filter(t => !t.startsWith('ext:') && !t.startsWith('in:'));
+    const ranked = index.files.filter(file => words.every(word => file.lower.includes(word)) &&
+      (!extensions.length || extensions.includes(path.extname(file.lower).slice(1))) &&
+      directories.every(dir => file.lower.startsWith(dir + '/'))).sort((a, b) => {
+        const score = (file: typeof a) => { const name = path.basename(file.lower); return words.reduce((n, word) => n + (name === word ? 0 : name.startsWith(word) ? 1 : name.includes(word) ? 2 : 3), 0); };
+        return score(a) - score(b) || a.path.localeCompare(b.path);
+      });
     let truncated = index.truncated;
-    for (const file of index.files) {
-      if (!file.lower.includes(needle)) continue;
+    for (const file of ranked) {
       if (paths.length === limit) { truncated = true; break; }
       paths.push(file.path);
     }
@@ -73,7 +87,7 @@ export class FileNameIndex {
       let valid = true;
       for (let i = 0; valid && i < index.directories.length; i += 8) {
         const batch = await Promise.all(index.directories.slice(i, i + 8).map(async directory => {
-          try { const info = await fs.lstat(directory.path); return info.isDirectory() && stamp(info) === directory.stamp; }
+          try { const info = await fs.lstat(directory.path); return (info.isDirectory() || info.isFile()) && stamp(info) === directory.stamp; }
           catch { return false; }
         }));
         valid = batch.every(Boolean);

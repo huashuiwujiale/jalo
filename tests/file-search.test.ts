@@ -5,6 +5,26 @@ import os from 'node:os';
 import path from 'node:path';
 import { FileNameIndex, walkSearchFiles } from '../engine/file-search';
 import { projectFiles, searchFiles } from '../engine/project-files';
+
+test('search follows nested gitignore rules, invalidates edited rules and supports ranked directory/type filters', async () => {
+  const x = await fixture();
+  try {
+    await fs.mkdir(path.join(x.root, 'src')); await fs.mkdir(path.join(x.root, 'generated'));
+    for (const file of ['src/app.ts', 'src/app.test.ts', 'src/app.js', 'app.ts', 'generated/app.ts']) await fs.writeFile(path.join(x.root, file), 'needle');
+    await fs.writeFile(path.join(x.root, '.gitignore'), 'generated/\n*.js\n');
+    await fs.writeFile(path.join(x.root, 'src', '.gitignore'), '*.test.ts\n!app.js\n');
+    const index = new FileNameIndex();
+    assert.deepEqual((await index.search(x.root, 'app ext:ts in:src', x.tools)).paths, ['src/app.ts']);
+    assert.deepEqual((await index.search(x.root, 'app.js', x.tools)).paths, ['src/app.js']);
+    assert.deepEqual((await index.search(x.root, 'app.ts', x.tools)).paths, ['app.ts', 'src/app.ts']);
+    await fs.writeFile(path.join(x.root, 'src', '.gitignore'), '!app.test.ts\n');
+    assert.deepEqual((await index.search(x.root, 'ext:ts in:src', x.tools)).paths, ['src/app.test.ts', 'src/app.ts']);
+    const result = await x.tools.execute('search_files', { query: 'needle', mode: 'content', path: 'src', extensions: ['ts'] });
+    assert.match(result, /src\/app.ts:1/); assert.match(result, /app.test.ts:1/); assert.doesNotMatch(result, /app.js/);
+    await fs.symlink(path.join(x.home, 'outside-ignore'), path.join(x.root, 'src', 'unsafe'));
+    assert.ok(!(await index.search(x.root, '', x.tools)).paths.some(p => p.includes('unsafe')));
+  } finally { await x.cleanup(); }
+});
 import { ToolRegistry } from '../engine/tools';
 
 async function fixture() {

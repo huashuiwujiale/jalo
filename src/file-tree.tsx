@@ -27,7 +27,7 @@ export function FileTree({ project, selected, initialPath, preview }: { project:
   }, [project.id, query]);
   const filtering = !!query.trim();
   return <div className="reference-search">
-    <label className="tree-filter"><Search size={16}/><input autoFocus aria-label="搜索项目文件" placeholder="筛选文件…" value={query} onChange={e => setQuery(e.target.value)}/></label>
+    <label className="tree-filter"><Search size={16}/><input autoFocus aria-label="搜索项目文件" placeholder="文件名 · ext:ts · in:src" value={query} onChange={e => setQuery(e.target.value)}/></label>
     <div className="file-tree" aria-label="项目文件">
       {filtering ? searching ? <p role="status">搜索中…</p> : searchError ? <p role="alert">{searchError}</p> : <>
         {!matches.length ? <p>没有匹配的文件</p> : <Directory key={`search:${query}`} directory="." depth={0} project={project} selected={selected} preview={preview} matches={matches}/>}

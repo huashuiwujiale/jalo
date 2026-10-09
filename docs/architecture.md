@@ -200,3 +200,5 @@ jalo/
 | 模型能力实测 | `src/model-evaluation.tsx`、`electron/evaluation.ts`、`engine/evaluation.ts`、`shared/evaluation.ts` |
 
 建议第一次读源码时，先看 `shared/types.ts` 理解对象，再沿 `src/main.tsx` → `electron/preload.cjs` → `electron/main.ts` → `engine/worker.ts` → `engine/runner.ts` → `engine/tools.ts` 阅读一条完整任务链路。
+
+文件搜索遵守根目录及嵌套 `.gitignore`（含否定规则，已排除目录不再遍历），规则文件只读取项目内普通文件，最大 64 KiB。规则文件修改使缓存失效；固定依赖目录和符号链接仍排除。界面搜索支持 `ext:ts`、`in:src` 与多个文件名词组合，优先精确文件名及文件名前缀；模型搜索支持目录和扩展名过滤。直接引用和文件工具仍独立执行路径及版本检查。

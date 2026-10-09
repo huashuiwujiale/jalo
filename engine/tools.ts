@@ -18,7 +18,7 @@ const specs = {
   find_vue_elements: { description: '读取并定位 Vue template 中的完整元素。按 tag、attributes 中的属性原名和字面值精确匹配，例如 {tag:"el-button",attributes:{"@click":"handleAdd"}}。text 可精确匹配直接文本（去除首尾空白）。返回完整原文、行号和版本；多个匹配时收窄条件，不猜行号。', schema: z.object({ path: relative, selector: vueSelector }).strict() },
   edit_vue_element: { description: '替换唯一匹配的完整 Vue 元素。必须先 find_vue_elements 用相同 selector 得到唯一且完整显示的结果，expectedVersion 使用返回版本。newText 为空表示删除；保留周围元素。多个匹配、过期版本或语法错误均不写入。', schema: z.object({ path: relative, selector: vueSelector, expectedVersion: z.string().length(64), newText: str }).strict() },
   list_directory: { description: '列出项目内目录；最多 200 项。', schema: z.object({ path: relative.default('.') }).strict() },
-  search_files: { description: '按文件名或文本字面量搜索项目，忽略依赖目录及符号链接。', schema: z.object({ query: z.string().min(1).max(200), mode: z.enum(['name', 'content']), path: relative.default('.') }).strict() },
+  search_files: { description: '按文件名或文本字面量搜索项目，遵守 .gitignore，忽略依赖目录及符号链接。可按 path 目录和 extensions 扩展名过滤。', schema: z.object({ query: z.string().min(1).max(200), mode: z.enum(['name', 'content']), path: relative.default('.'), extensions: z.array(z.string().regex(/^[a-zA-Z0-9]+$/)).max(10).optional() }).strict() },
   read_file: { description: '读取 UTF-8 文本并建立修改前的版本检查。大文件可分页读取。', schema: z.object({ path: relative, startLine: z.number().int().min(1).default(1), lines: z.number().int().min(1).max(400).default(200) }).strict() },
   write_file: { description: '创建或替换 UTF-8 文件。修改现有文件前必须 read_file；遇到外部修改须重新读取。', schema: z.object({ path: relative, content: str }).strict() },
   edit_file: { description: '精确原文替换，不支持正则。必须先 read_file。oldText 保留原有空格与换行，不包含显示用行号。存在多处相同文本时，同时传 startLine/endLine 限定已读取的目标行范围，范围内仍须唯一匹配。', schema: z.object({ path: relative, oldText: str.min(1).describe('直接复制文件原文，不要添加正则转义或行号'), newText: str, startLine: z.number().int().min(1).optional(), endLine: z.number().int().min(1).optional() }).strict().refine(a => (a.startLine === undefined && a.endLine === undefined) || (a.startLine !== undefined && a.endLine !== undefined && a.endLine >= a.startLine), 'startLine 和 endLine 必须同时传入，且 endLine 不小于 startLine') },
@@ -183,6 +183,7 @@ export class ToolRegistry {
       const results: string[] = [], budget = { maxEntries: 3000, visited: 0, truncated: false };
       const needle = args.query.toLowerCase(), signal = this.options.signal;
       for await (const rel of walkSearchFiles(this, args.path, budget, signal)) {
+        if (args.extensions?.length && !args.extensions.map((s: string) => s.toLowerCase()).includes(path.extname(rel).slice(1).toLowerCase())) continue;
         if (args.mode === 'name') { if (rel.toLowerCase().includes(needle)) results.push(rel); }
         else {
           try {
