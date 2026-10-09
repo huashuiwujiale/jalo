@@ -121,6 +121,13 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     assert.equal((await snapshot()).tasks[0].title,'新的任务名称');
     const worker=workers.at(-1);worker.emit('message',{type:'done',runId:'other-run',status:'completed'});assert.equal((await snapshot()).tasks[0].status,'running');
     const firstInput=worker.sent.find((m:any)=>m.type==='start').input;
+    const commandId = randomUUID(), commandDir = worker.sent.find((m:any)=>m.type==='start').commandDirectory;
+    await fs.mkdir(commandDir,{recursive:true});await fs.writeFile(path.join(commandDir,commandId+'.log'),'command output');
+    worker.emit('message',{type:'command',runId:run.id,command:{id:commandId,command:'printf test',cwd:root,startedAt:1,status:'completed',exitCode:0}});
+    assert.equal((await invoke('command:output',{taskId,runId:run.id,commandId})).text,'command output');
+    await assert.rejects(invoke('command:output',{taskId,runId:run.id,commandId:randomUUID()}),/不属于/);
+    await assert.rejects(invoke('command:output',{taskId,runId:run.id,commandId,offset:-1}));
+    await assert.rejects(handlers.get('command:output')!({sender:{},senderFrame:{}},{taskId,runId:run.id,commandId}),/无效的调用来源/);
     assert.ok(!('content' in firstInput.run.references[0]));
     const planMessages=[{role:'system' as const,content:'plan rules'},...firstInput.messages];
     const planSender=new MessagePatchSender(firstInput.messages), setupPatch=planSender.update(planMessages)!;

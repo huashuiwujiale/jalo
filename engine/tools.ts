@@ -2,13 +2,15 @@ import { promises as fs, constants } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
+import { CommandOutputWriter } from './command-output';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { createTwoFilesPatch } from 'diff';
 import { checkSyntax, version } from './syntax';
 import { findVueElements } from './vue-elements';
 import { searchIgnored as ignored, walkSearchFiles } from './file-search';
-import type { Approval, Change, EngineEvent, RunEvidence, Mode, RunChange } from '../shared/types';
+import type { Approval, Change, EngineEvent, RunEvidence, Mode, RunChange, CommandSession } from '../shared/types';
 import type { ToolDefinition } from './provider';
 
 const str = z.string().max(48000);
@@ -37,6 +39,7 @@ export class EditMatchError extends Error {
   constructor(public file: string, message: string) { super(message); this.name = 'EditMatchError'; }
 }
 export interface ToolOptions {
+  commandDirectory?: string;
   root: string; signal: AbortSignal; timeout: number; backupDir: string;
   emit: (event: EngineEvent) => void;
   approve: (approval: Approval) => Promise<boolean>;
@@ -325,11 +328,14 @@ export class ToolRegistry {
     this.options.signal.throwIfAborted();
     if (!approved) return '用户拒绝了该命令。未执行，不得尝试通过其他工具绕过。';
     await this.resolve(path.relative(this.root, cwd) || '.');
+    const record: CommandSession = { id: randomUUID(), command, cwd, startedAt: Date.now(), status: 'running' };
+    const log = this.options.commandDirectory ? new CommandOutputWriter(this.options.commandDirectory, record.id) : undefined;
+    this.options.emit({ type: 'command', command: { ...record } });
     return new Promise<string>((resolve, reject) => {
       const env = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'USER'].filter(k => process.env[k]).map(k => [k, process.env[k]!]));
       const child = spawn('/bin/zsh', ['-f', '-c', command], { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       if (child.pid) this.options.emit({ type: 'process', pid: child.pid, running: true });
-      let output = '', clipped = false, timedOut = false, escalation: ReturnType<typeof setTimeout> | undefined;
+      let output = '', tail = '', displayed = 0, totalBytes = 0, clipped = false, timedOut = false, failure: unknown, escalation: ReturnType<typeof setTimeout> | undefined;
       const kill = (signal: NodeJS.Signals) => { if (child.pid) { try { process.kill(-child.pid, signal); } catch {} } };
       const stop = () => { kill('SIGTERM'); escalation ??= setTimeout(() => kill('SIGKILL'), 700); };
       const timer = setTimeout(() => { timedOut = true; stop(); }, this.options.timeout * 1000);
@@ -337,16 +343,21 @@ export class ToolRegistry {
       this.options.signal.addEventListener('abort', stop, { once: true });
       if (this.options.signal.aborted) stop();
       const append = (text: string) => {
-        const chunk = text.slice(0, Math.max(0, 32000 - output.length)); output += chunk;
+        totalBytes += Buffer.byteLength(text); output += text.slice(0, Math.max(0, 32000 - output.length)); tail = (tail + text).slice(-16000);
+        const chunk = text.slice(0, Math.max(0, 32000 - displayed)); displayed += chunk.length;
         if (chunk) this.options.emit({ type: 'event', event: { id: randomUUID(), at: Date.now(), kind: 'output', text: chunk } });
         if (chunk.length < text.length) clipped = true;
+        if (!failure) try { log?.append(text); } catch (error) { failure = error; stop(); }
       };
-      child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
-      child.stdout.on('data', append); child.stderr.on('data', append);
-      child.on('error', error => { cleanup(); reject(error); });
-      child.on('close', code => { cleanup(); this.seen.clear(); this.readRanges.clear();
-        if (this.options.signal.aborted) reject(new Error('任务已停止'));
-        else resolve(`退出码：${code}${timedOut ? '；命令超时，已终止' : ''}\n${output}${clipped ? '\n输出已截断' : ''}`);
+      const stdout = new StringDecoder('utf8'), stderr = new StringDecoder('utf8');
+      child.stdout.on('data', data => append(stdout.write(data))); child.stderr.on('data', data => append(stderr.write(data)));
+      child.on('error', error => { failure = error; });
+      child.on('close', (code, signal) => { append(stdout.end()); append(stderr.end()); cleanup(); this.seen.clear(); this.readRanges.clear();
+        try { log?.close(); } catch (error) { failure ??= error; }
+        this.options.emit({ type: 'command', command: { ...record, status: signal || failure || this.options.signal.aborted ? 'interrupted' : 'completed', endedAt: Date.now(), exitCode: code ?? undefined, timedOut, totalBytes, outputBytes: log?.bytes, outputTruncated: log?.truncated, tail } });
+        if (failure) reject(failure);
+        else if (this.options.signal.aborted) reject(new Error('任务已停止'));
+        else resolve(`退出码：${code}${timedOut ? '；命令超时，已终止' : ''}\n${clipped ? output.slice(0, 16000) + '\n[中段省略；可在命令日志查看]\n' + tail : output}`);
       });
     });
   }

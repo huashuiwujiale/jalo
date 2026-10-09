@@ -26,7 +26,9 @@ export interface CapturedReference extends FileReference { content: string }
 export interface FilePage { path: string; version: string; totalLines: number; startLine: number; endLine: number; content: string; hasMore: boolean }
 export interface CheckResult { path: string; status: 'passed' | 'failed' | 'skipped'; parser: string; message: string; at: number; version: string }
 export interface RunChange extends Change { id: string; runId: string; beforeVersion: string | null; afterVersion: string; check: CheckResult; state: 'prepared' | 'written' | 'reverted' | 'uncertain'; revertedAt?: number }
-export interface Run { id: string; taskId: string; mode: Mode; model?: string; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planText?: string; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
+export interface CommandSession { id: string; command: string; cwd: string; startedAt: number; endedAt?: number; status: 'running' | 'completed' | 'interrupted'; exitCode?: number; timedOut?: boolean; totalBytes?: number; outputBytes?: number; outputTruncated?: boolean; tail?: string }
+export interface CommandOutputPage { text: string; next: number; totalBytes: number; hasMore: boolean }
+export interface Run { commands?: CommandSession[]; id: string; taskId: string; mode: Mode; model?: string; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planText?: string; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
 export interface SubmitInput { projectId: string; prompt: string; taskId?: string; model?: string; mode?: Mode; references?: FileReference[]; planRunId?: string; reviewRunId?: string }
 export interface RollbackPreview { token: string; patch: string; path: string; createsRecoveryCopy: boolean }
 export interface Change { path: string; before: string | null; after: string; patch: string }
@@ -68,6 +70,7 @@ export type EngineEvent = (
   | { type: 'followup-applied'; id: string }
   | { type: 'context'; usage: import('./context').ContextUsage }
   | { type: 'progress'; progress: Progress }
+  | { type: 'command'; command: CommandSession }
   | { type: 'process'; pid: number; running: boolean }
   | { type: 'delta'; text: string }
   | { type: 'event'; event: Event }
@@ -100,6 +103,7 @@ export interface Api {
   taskPage(input: TaskQuery): Promise<TaskPage>;
   searchTasks(input: { projectId: string; archived: boolean; query: string }): Promise<string[]>;
   planText(taskId: string, runId: string): Promise<string>;
+  commandOutput(input: { taskId: string; runId: string; commandId: string; offset?: number }): Promise<CommandOutputPage>;
   changePatch(input: { taskId: string; runId?: string; path: string }): Promise<{ patch: string; version: string }>;
   saveSettings(settings: Settings): Promise<void>;
   models(): Promise<LocalModel[]>;

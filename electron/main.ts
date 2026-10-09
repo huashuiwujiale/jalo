@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { captureReferences, previewFile, referenceFile, referenceContext, searchFiles, listDirectory, rollbackPreview, restoreFile } from '../engine/project-files';
 import { createTwoFilesPatch } from 'diff';
 import { Store } from './store';
+import { commandOutput } from '../engine/command-output';
 import { SessionStore } from './session';
 import { viewSchema } from '../shared/session';
 import { EvaluationController } from './evaluation';
@@ -138,6 +139,7 @@ function finish(task: Task, status: Task['status'], error?: string) {
   replies.end(task.id);
   clearTimeout(previous.timer); killProcesses(previous.pids);
   task.status = status; task.error = error; task.approval = undefined;
+  for (const command of task.runs?.find(r => r.id === task.currentRunId)?.commands || []) if (command.status === 'running') { command.status = 'interrupted'; command.endedAt = Date.now(); }
   diagnostics.record({ event: 'task_finished', taskId: task.id, runId: task.currentRunId, status, ...(error ? { errorCategory: errorCategory(error) } : {}) });
   active = undefined; configs.delete(task.id); previous.worker.kill();
   try { persist(task); } catch { return; }
@@ -194,6 +196,7 @@ function pump() {
           catch (e) { diagnostics.record({ event: 'checkpoint_error', taskId: task.id, runId: run.id, errorCategory: errorCategory(e) }); worker.postMessage({ type: 'checkpoint-ack', id: event.checkpoint.id, error: '检查点保存失败，禁止写入' }); }
           return;
         }
+        if (event.type === 'command' && run) { run.commands ??= []; const index = run.commands.findIndex(c => c.id === event.command.id); if (index < 0) run.commands.push(event.command); else run.commands[index] = event.command; persist(task); return; }
         if (event.type === 'check' && run) run.checks.push(event.check);
         if (event.type === 'process') { if (event.running) { active.pids.add(event.pid); if (run?.progress?.phase !== 'stopping') { progress(task, 'command'); persist(task, 'deferred'); } } else { active.pids.delete(event.pid); fileNameIndex.clear(project.path); } return; }
         if (event.type === 'delta') { replies.append(task.id, task.currentRunId!, event.text); return; }
@@ -217,7 +220,7 @@ function pump() {
     worker.on('exit', code => { if (active?.worker === worker) { diagnostics.record({ event: 'worker_exit', taskId: task.id, runId: task.currentRunId, exitCode: code }); finish(task, 'interrupted', `任务进程意外退出（${code}）。${stderr.slice(-500)} 请检查修改后手动继续。`); } });
     worker.on('spawn', () => {
       if (active?.worker !== worker || quitting) return;
-      try { worker.postMessage({ type: 'start', input: { ...payload.input, followups: task.followups?.filter(f => f.kind === 'steer') }, root: project.path, backupDir: path.join(app.getPath('userData'), 'backups', task.id), settings: configs.get(task.id) || settings() }); }
+      try { worker.postMessage({ type: 'start', input: { ...payload.input, followups: task.followups?.filter(f => f.kind === 'steer') }, root: project.path, backupDir: path.join(app.getPath('userData'), 'backups', task.id), commandDirectory: path.join(app.getPath('userData'), 'commands', task.id, task.currentRunId!), settings: configs.get(task.id) || settings() }); }
       catch (error) { finish(task, 'failed', (error as Error).message); }
     });
     persist(task);
@@ -379,6 +382,12 @@ function registerApi() {
     const v = z.object({ taskId: uuid, runId: uuid }).strict().parse(raw), { run } = locateRun(v.taskId, v.runId);
     if (run.mode !== 'plan' || run.status !== 'completed' || !run.planText?.trim()) throw new Error('该计划缺少完整保存的正文，请重新生成计划后执行');
     return run.planText;
+  });
+  register('command:output', (raw: unknown) => {
+    const input = z.object({ taskId: uuid, runId: uuid, commandId: uuid, offset: z.number().int().nonnegative().max(16777216).optional() }).strict().parse(raw);
+    const task = residentTasks.get(input.taskId), run = task?.runs?.find(r => r.id === input.runId) || store.view(input.taskId).runs.find(r => r.id === input.runId);
+    if (!run?.commands?.some(c => c.id === input.commandId)) throw new Error('命令记录不属于当前轮次');
+    return commandOutput(path.join(app.getPath('userData'), 'commands', input.taskId, input.runId), input.commandId, input.offset);
   });
   register('changes:patch', (raw: unknown) => {
     const v = z.object({ taskId: uuid, runId: uuid.optional(), path: z.string().min(1).max(1024) }).strict().parse(raw);

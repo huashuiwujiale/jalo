@@ -200,3 +200,10 @@ button:disabled { cursor:not-allowed;opacity:.5; }
 .followup-list>div { display:flex; align-items:center; gap:8px; padding:4px 0; }
 .followup-list span { flex:1; overflow-wrap:anywhere; white-space:pre-wrap; }
 .followup-list button { flex-shrink:0; }
+
+.command-panel { padding:12px; border-bottom:1px solid #e4e7eb; font-size:12px; }
+.command-panel label { display:flex; flex-direction:column; gap:6px; }
+.command-panel select { width:100%; }
+.command-panel pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+.command-panel .command-output { max-height:320px; overflow:auto; }
+.command-controls { display:flex; gap:6px; margin:8px 0; }

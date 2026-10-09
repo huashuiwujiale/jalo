@@ -39,7 +39,7 @@ port.on('message', async ({ data }: any) => {
   }
   if (data.type !== 'start' || started) return;
   started = true;
-  const { input, root, backupDir } = data as { input: WorkerInput; root: string; backupDir: string };
+  const { input, root, backupDir, commandDirectory } = data as { input: WorkerInput; root: string; backupDir: string; commandDirectory?: string };
   runId = input?.run?.id;
   for (const followup of input.followups || []) steering.add(followup);
   const settings: Settings = { ...data.settings };
@@ -65,7 +65,7 @@ port.on('message', async ({ data }: any) => {
       settings.model = await provider.load(model.key, settings.contextLength, controller.signal);
     }
     if (settings.maxTokens >= settings.contextLength / 2) throw new Error('已加载模型的上下文过小，请卸载后使用更大上下文重新加载，或降低最大输出');
-    const registry = new ToolRegistry({ root, backupDir, signal: controller.signal, timeout: settings.commandTimeout, emit, approve, changes: input.changes, mode: run.mode, runId, reviewChanges: input.reviewChanges, checkpoint: change => new Promise<void>((resolve, reject) => { checkpoints.set(change.id, { resolve, reject }); emit({ type: 'checkpoint', checkpoint: change }); }) });
+    const registry = new ToolRegistry({ root, backupDir, commandDirectory, signal: controller.signal, timeout: settings.commandTimeout, emit, approve, changes: input.changes, mode: run.mode, runId, reviewChanges: input.reviewChanges, checkpoint: change => new Promise<void>((resolve, reject) => { checkpoints.set(change.id, { resolve, reject }); emit({ type: 'checkpoint', checkpoint: change }); }) });
     await new TaskRunner(provider, registry, settings, emit, controller.signal, () => steering.take()).run({ messages: input.messages });
   } catch (error) {
     emit({ type: 'done', status: controller.signal.aborted ? 'cancelled' : 'failed', error: controller.signal.aborted ? undefined : (error as Error).message });

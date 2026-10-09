@@ -5,6 +5,7 @@ import { FilePicker, RunPanel, RunResult, modeLabels } from './reliability';
 import type { Mode, FileReference, Api, LocalModel, Settings, Snapshot, TaskSummary, Project } from '../shared/types';
 import { busyStatuses, defaults } from '../shared/types';
 import './style.css';
+import { CommandPanel } from './command-panel';
 import { TimelineRows } from './timeline-rows';
 import { StreamingReply } from './streaming-reply';
 import { useTaskDetail } from './task-detail';
@@ -288,7 +289,7 @@ function App() {
       </div>
     </main>
     <aside className="inspector"><header><span>任务工作区</span><span className="inspector-counter">{task?.changes.length || 0} 个文件</span></header><div className="inspector-tabs"><button className={tab === 'changes' ? 'active' : ''} onClick={() => setTab('changes')}><GitBranch size={14}/>修改</button><button className={tab === 'terminal' ? 'active' : ''} onClick={() => setTab('terminal')}><Terminal size={14}/>终端</button></div>
-      {tab === 'changes' ? <RunPanel task={task} runId={runId} selectRun={setRunId} locked={projectBusy} fail={fail} preview={path => setPicker({ path })}/> : <div className="terminal-panel"><div className="terminal-heading"><span className="green-dot"/>zsh <span>只显示本任务输出</span></div>{task && <HistoryControls hasMore={history.hasMore} loading={history.loading} incomplete={task.historyIncomplete} load={() => void history.loadEarlier()}/>}<pre>{history.events.filter(e => e.kind === 'output').map(e => e.text).join('') || '已加载记录中暂无命令输出。\n\n每条命令将在确认后运行。'}</pre><p>终端修改不计入文件工具差异。</p></div>}
+      {tab === 'changes' ? <RunPanel task={task} runId={runId} selectRun={setRunId} locked={projectBusy} fail={fail} preview={path => setPicker({ path })}/> : <div className="terminal-panel"><CommandPanel key={`${taskId}:${runId}`} api={api} task={task} runId={runId}/><div className="terminal-heading"><span className="green-dot"/>zsh <span>只显示本任务输出</span></div>{task && <HistoryControls hasMore={history.hasMore} loading={history.loading} incomplete={task.historyIncomplete} load={() => void history.loadEarlier()}/>}<pre>{history.events.filter(e => e.kind === 'output').map(e => e.text).join('') || '已加载记录中暂无命令输出。\n\n每条命令将在确认后运行。'}</pre><p>终端修改不计入文件工具差异。</p></div>}
       <div className="runtime-card"><div><Cpu size={15}/><strong>本地运行环境</strong></div><dl><dt>推理服务</dt><dd>LM Studio</dd><dt>执行引擎</dt><dd>独立进程</dd><dt>任务调度</dt><dd>{state.activeId ? '1 个运行中' : '空闲'}{state.tasks.some(t => t.status === 'queued') ? ` · ${state.tasks.filter(t => t.status === 'queued').length} 个排队` : ''}</dd></dl></div>
     </aside>
     {error && <div className="toast" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={() => setError('')}><X size={16}/></button></div>}

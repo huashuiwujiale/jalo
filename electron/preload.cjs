@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('localCode', Object.freeze({
   taskPage: input => ipcRenderer.invoke('tasks:page', input),
   searchTasks: input => ipcRenderer.invoke('tasks:search', input),
   planText: (taskId, runId) => ipcRenderer.invoke('runs:plan', { taskId, runId }),
+  commandOutput: input => ipcRenderer.invoke('command:output', input),
   changePatch: input => ipcRenderer.invoke('changes:patch', input),
   saveSettings: settings => ipcRenderer.invoke('settings:save', settings),
   models: () => ipcRenderer.invoke('models:list'),

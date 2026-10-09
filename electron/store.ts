@@ -66,6 +66,7 @@ export class Store {
         }
         if (!task.runs?.length && !task.legacy) { task.legacy = true; changed = true; }
         for (const run of task.runs || []) {
+          for (const command of run.commands || []) if (command.status === 'running') { command.status = 'interrupted'; command.endedAt = Date.now(); changed = true; }
           if (busyStatuses.includes(run.status)) { run.status = 'interrupted'; run.endedAt = Date.now(); changed = true; }
           if (run.progress && !busyStatuses.includes(run.status) && !run.progress.endedAt) { run.progress.endedAt = run.endedAt || Date.now(); changed = true; }
           for (const change of run.changes) if (change.state === 'prepared') { change.state = 'uncertain'; changed = true; }
@@ -246,7 +247,7 @@ export class Store {
       return view;
     });
     const view = { ...data, runs: views, changes: changes.map(changeView) };
-    const recovery = (!runs?.length && !task.legacy) || busyStatuses.includes(task.status) || views.some(run => busyStatuses.includes(run.status) || (run.progress && !run.progress.endedAt) || run.changes.some(change => change.state === 'prepared'));
+    const recovery = (!runs?.length && !task.legacy) || busyStatuses.includes(task.status) || views.some(run => busyStatuses.includes(run.status) || run.commands?.some(c => c.status === 'running') || (run.progress && !run.progress.endedAt) || run.changes.some(change => change.state === 'prepared'));
     this.db.prepare('INSERT INTO task_catalog (id,project_id,archived,title,data,view,requests,recovery) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,archived=excluded.archived,title=excluded.title,data=excluded.data,view=excluded.view,requests=excluded.requests,recovery=excluded.recovery WHERE data<>excluded.data OR view<>excluded.view OR requests<>excluded.requests OR recovery<>excluded.recovery').run(
       task.id, task.projectId, Number(!!task.archivedAt), task.title.toLocaleLowerCase(), JSON.stringify(taskSummary(task, 0)), JSON.stringify(view), JSON.stringify([...requestTexts(task)].map(text => text.toLocaleLowerCase())), Number(recovery));
   }
