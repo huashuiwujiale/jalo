@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
+import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 import { FileNameIndex, walkSearchFiles } from '../engine/file-search';
@@ -75,6 +77,79 @@ test('cached names reflect creates, renames, deletes and file or parent link rep
     await fs.writeFile(path.join(x.root, 'src', 'new.ts'), 'new');
     assert.deepEqual((await search()).paths, ['src/new.ts']);
   } finally { await x.cleanup(); }
+});
+
+test('directory notifications invalidate cached names even when all metadata stamps are unchanged', async t => {
+  const x = await fixture(), index = new FileNameIndex();
+  try {
+    const src = path.join(x.root, 'src'); await fs.mkdir(src);
+    await fs.writeFile(path.join(src, 'one.ts'), 'one');
+    await fs.writeFile(path.join(src, 'three.ts'), 'three');
+    const lstat = fs.lstat, frozen = new Map(await Promise.all([x.root, src].map(async full => [full, await lstat(full)] as const)));
+    t.mock.method(fs, 'lstat', async (full: string) => frozen.get(full) || lstat(full));
+    const callbacks = new Map<string, () => void>();
+    t.mock.method(fsSync, 'watch', (full: any, _options: any, listener: any) => {
+      callbacks.set(String(full), listener);
+      return Object.assign(new EventEmitter(), { close() {} }) as any;
+    });
+    assert.deepEqual((await index.search(x.root, '.ts', x.tools)).paths, ['src/one.ts', 'src/three.ts']);
+    await fs.unlink(path.join(src, 'one.ts')); await fs.symlink('three.ts', path.join(src, 'one.ts'));
+    callbacks.get(src)!();
+    assert.deepEqual((await index.search(x.root, '.ts', x.tools)).paths, ['src/three.ts']);
+    await fs.rename(path.join(src, 'three.ts'), path.join(src, 'other.ts'));
+    callbacks.get(src)!();
+    assert.deepEqual((await index.search(x.root, 'other.ts', x.tools)).paths, ['src/other.ts']);
+  } finally { index.clear(); t.mock.restoreAll(); await x.cleanup(); }
+});
+
+test('watch errors and unavailable monitoring fall back to rescans, and eviction/clear release handles', async t => {
+  const x = await fixture(), index = new FileNameIndex({ maxProjects: 1 });
+  const watchers: (EventEmitter & { closed: boolean; close(): void })[] = [];
+  try {
+    t.mock.method(fsSync, 'watch', () => {
+      const watcher = Object.assign(new EventEmitter(), { closed: false, close() { this.closed = true; } });
+      watchers.push(watcher); return watcher as any;
+    });
+    await index.search(x.root, '', x.tools);
+    watchers[0].emit('error', new Error('watch lost'));
+    assert.equal(watchers[0].closed, true);
+    await index.search(x.root, '', x.tools);
+    const other = path.join(x.home, 'other'); await fs.mkdir(other);
+    await index.search(other, '', await projectFiles(other));
+    assert.equal(watchers[1].closed, true, 'LRU eviction closes the old project watcher');
+    index.clear(); assert.ok(watchers.every(watcher => watcher.closed));
+    t.mock.method(fsSync, 'watch', () => { throw new Error('watch unavailable'); });
+    const open = fs.opendir; let opens = 0;
+    t.mock.method(fs, 'opendir', async (full: string) => { opens++; return open(full); });
+    await index.search(x.root, '', x.tools); await index.search(x.root, '', x.tools);
+    assert.equal(opens, 2, 'unmonitored indexes are rebuilt instead of silently reused');
+  } finally { index.clear(); t.mock.restoreAll(); await x.cleanup(); }
+});
+
+test('watch handles stay bounded and an index cleared during a scan cannot retain them', async t => {
+  const x = await fixture(), index = new FileNameIndex();
+  const watchers: { closed: boolean }[] = [];
+  try {
+    t.mock.method(fsSync, 'watch', () => {
+      const watcher = Object.assign(new EventEmitter(), { closed: false, close() { this.closed = true; } });
+      watchers.push(watcher); return watcher as any;
+    });
+    await Promise.all(Array.from({ length: 130 }, (_, i) => fs.mkdir(path.join(x.root, String(i)))));
+    await index.search(x.root, '', x.tools);
+    assert.equal(watchers.length, 128); assert.ok(watchers.every(watcher => watcher.closed));
+    index.clear(); watchers.length = 0;
+    const other = path.join(x.home, 'pending'); await fs.mkdir(other);
+    const otherTools = await projectFiles(other);
+    const open = fs.opendir;
+    let entered!: () => void, unblock!: () => void;
+    const scanning = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { unblock = resolve; });
+    t.mock.method(fs, 'opendir', async (full: string) => { entered(); await gate; return open(full); });
+    const pending = index.search(other, '', otherTools);
+    await scanning; index.clear(); unblock(); await pending;
+    assert.equal(watchers.length, 1);
+    assert.ok(watchers.every(watcher => watcher.closed), 'pending scans release their own watchers after invalidation');
+  } finally { index.clear(); t.mock.restoreAll(); await x.cleanup(); }
 });
 
 test('result cap does not prevent a later narrow query from finding other indexed files', async () => {
