@@ -15,7 +15,9 @@
   "main": "electron/bootstrap.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "setup:pty": "node scripts/setup-pty.mjs",
     "test": "tsx --test tests/*.test.ts",
+    "test:ui": "node scripts/test-ui.mjs",
     "test:live": "tsx scripts/live.ts",
     "build": "node scripts/build.mjs",
     "dist:mac": "npm run build && electron-builder --mac dmg --arm64 --publish never",

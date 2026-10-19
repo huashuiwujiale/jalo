@@ -1,5 +1,6 @@
 // Run with Electron; uses mock IPC, temporary data, and a Vite development server.
 const { app, BrowserWindow, ipcMain } = require('electron');
+app.disableHardwareAcceleration();
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -35,9 +36,9 @@ state.tasks[0].runs=[{id:randomUUID(),taskId:t,mode:'plan',input:'样例',create
 state.tasks[0].currentRunId=state.tasks[0].runs[0].id;
 const a={...emptyView(p,t),prompt:'草稿 A',references:[{projectId:p,path:'a.txt',startLine:1,endLine:2,version:'a'.repeat(64)}],scroll:{top:0,follow:false,anchor:'event-20',offset:0,expanded:['tool-a']}};
 session.update({...emptyView(q,u),prompt:'草稿 B'});session.update(a);session.flush();
-let win, server, failSubmit=true, finished=false, sequence=0;
+let win, server, failSubmit=true, finished=false, sequence=0, catalogVersion=0;
 const revisions=new Map();
-const catalog=()=>({...state,sequence,tasks:state.tasks.map(task=>taskSummary(task,revisions.get(task.id)||0))});
+const catalog=()=>({...state,sequence,catalogVersion,tasks:state.tasks.map(task=>taskSummary(task,revisions.get(task.id)||0))});
 function sender(event){assert.equal(event.sender,win.webContents);assert.equal(event.senderFrame,win.webContents.mainFrame);}
 const fixture=id=>state.projects.find(p=>p.id===id);
 let delayReference=false, viewSaves=0;
@@ -51,6 +52,17 @@ ipcMain.handle('files:preview',(event,input)=>{sender(event);return projectFiles
 ipcMain.handle('files:reference',async(event,input)=>{sender(event);if(delayReference)await new Promise(r=>setTimeout(r,400));return projectFiles.referenceFile(fixture(input.projectId),input.path);});
 ipcMain.handle('app:snapshot',event=>{sender(event);return catalog();});
 ipcMain.handle('task:detail',(event,id)=>{sender(event);return taskDetail(state.tasks.find(task=>task.id===id),revisions.get(id)||0);});
+ipcMain.handle('task:summary',(event,id)=>{sender(event);return taskSummary(state.tasks.find(task=>task.id===id),revisions.get(id)||0);});
+const taskPageRequests=[];
+ipcMain.handle('tasks:page',(event,input)=>{
+  sender(event);taskPageRequests.push(input);
+  const all=state.tasks.filter(task=>!input.projectId || task.projectId===input.projectId);
+  const counts=[all.filter(task=>!task.archivedAt).length,all.filter(task=>!!task.archivedAt).length];
+  const matches=filterTasks(all,input.projectId,!!input.archived,input.query||'').sort((a,b)=>b.createdAt-a.createdAt || (a.id<b.id?1:a.id>b.id?-1:0));
+  const remaining=matches.filter(task=>!input.cursor || task.createdAt<input.cursor.createdAt || (task.createdAt===input.cursor.createdAt && task.id<input.cursor.id));
+  const limit=input.limit||100,tasks=remaining.slice(0,limit),last=tasks.at(-1);
+  return {tasks:tasks.map(task=>taskSummary(task,revisions.get(task.id)||0)),counts,next:remaining.length>limit?{createdAt:last.createdAt,id:last.id}:undefined};
+});
 const eventRequests=[];
 ipcMain.handle('task:events',(event,input)=>{sender(event);eventRequests.push(input);const {taskId,...cursor}=input;return pageTaskEvents(state.tasks.find(task=>task.id===taskId),cursor);});
 ipcMain.handle('tasks:search',(event,input)=>{sender(event);return filterTasks(state.tasks,input.projectId,input.archived,input.query).map(task=>task.id);});
@@ -60,23 +72,24 @@ ipcMain.on('session:flush',(event,view)=>{try{sender(event);session.update(viewS
 ipcMain.handle('task:submit',(event,input)=>{
   sender(event);if(failSubmit)throw new Error('模拟提交失败');
   const id=input.taskId||randomUUID();if(!input.taskId)state.tasks.unshift({...makeTask(id,input.projectId),title:'新任务'});
-  revisions.set(id,(revisions.get(id)||0)+1);sequence++;
-  win.webContents.send('app:update',{sequence,tasks:[taskSummary(state.tasks.find(task=>task.id===id),revisions.get(id))]});return id;
+  revisions.set(id,(revisions.get(id)||0)+1);sequence++;catalogVersion++;
+  win.webContents.send('app:update',{sequence,catalogVersion,tasks:[taskSummary(state.tasks.find(task=>task.id===id),revisions.get(id))]});return id;
 });
-function fixtureUpdate(task){revisions.set(task.id,(revisions.get(task.id)||0)+1);sequence++;win.webContents.send('app:update',{sequence,tasks:[taskSummary(task,revisions.get(task.id))]});}
+function fixtureUpdate(task){revisions.set(task.id,(revisions.get(task.id)||0)+1);sequence++;catalogVersion++;win.webContents.send('app:update',{sequence,catalogVersion,tasks:[taskSummary(task,revisions.get(task.id))]});}
 ipcMain.handle('task:rename',(event,input)=>{sender(event);const task=state.tasks.find(task=>task.id===input.taskId);task.title=input.title;fixtureUpdate(task);});
 ipcMain.handle('task:archive',(event,input)=>{sender(event);const task=state.tasks.find(task=>task.id===input.taskId);if(input.archived)task.archivedAt=Date.now();else delete task.archivedAt;fixtureUpdate(task);});
 const js=async code=>{try{return await win.webContents.executeJavaScript(code);}catch(error){console.error('Failed UI expression:',code);throw error;}};
 async function waitFor(condition){await js(`(async()=>{for(let i=0;i<400;i++){if(${condition})return;await new Promise(r=>setTimeout(r,25));}throw Error('界面条件未满足：'+${JSON.stringify(condition)});})()`);}
-const input=text=>js(`(()=>{const e=document.querySelector('textarea');e.focus();Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,${JSON.stringify(text)});e.setSelectionRange(e.value.length,e.value.length);e.dispatchEvent(new Event('input',{bubbles:true}));})()`);
-const key=name=>js(`document.querySelector('textarea').dispatchEvent(new KeyboardEvent('keydown',{key:${JSON.stringify(name)},bubbles:true}))`);
+const input=text=>js(`window.smokeInput(${JSON.stringify(text)})`);
+const key=name=>js(`document.querySelector('.mention-editor').dispatchEvent(new KeyboardEvent('keydown',{key:${JSON.stringify(name)},bubbles:true}))`);
 const anchorOffset=()=>js(`(()=>{const pane=document.querySelector('.conversation'),node=pane.querySelector('[data-event-id="event-20"]');return node.getBoundingClientRect().top-pane.getBoundingClientRect().top;})()`);
 async function revealEvent(id){
-  await js(`document.querySelector('.conversation').scrollTop=0`);
+  await js(`(()=>{const pane=document.querySelector('.conversation');pane.scrollTop=0;pane.dispatchEvent(new Event('scroll'));})()`);
+  await new Promise(r=>setTimeout(r,80));
   for(let i=0;i<200;i++){
     if(await js(`(()=>{const pane=document.querySelector('.conversation'),node=pane.querySelector('[data-event-id="${id}"]');if(!node)return false;pane.scrollTop+=node.getBoundingClientRect().top-pane.getBoundingClientRect().top;return true;})()`)){
       await new Promise(r=>setTimeout(r,80));
-      if(await js(`!!document.querySelector('[data-event-id="${id}"]')`))return;
+      if(await js(`(()=>{const pane=document.querySelector('.conversation'),node=pane.querySelector('[data-event-id="${id}"]');return !!node && Math.abs(node.getBoundingClientRect().top-pane.getBoundingClientRect().top)<3;})()`))return;
       continue;
     }
     await js(`document.querySelector('.conversation').scrollTop+=Math.max(100,document.querySelector('.conversation').clientHeight/2)`);
@@ -85,12 +98,14 @@ async function revealEvent(id){
   throw Error('Cannot reveal event '+id);
 }
 async function openWindow(url, anchor='event-20'){
-  win=new BrowserWindow({show:false,width:1440,height:940,webPreferences:{preload:path.join(project,'electron/preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false}});
+  win=new BrowserWindow({show:true,width:1440,height:940,webPreferences:{preload:path.join(project,'electron/preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});
   await win.loadURL(url);
-  try{await waitFor(`document.querySelector('textarea') && document.querySelector('[data-event-id="${anchor}"]')`);}
+  await js(`(async()=>{const {editorText}=await import('/src/mention-editor.ts');Object.defineProperty(window,'smokePrompt',{get:()=>editorText(document.querySelector('.mention-editor'))});})()`);
+  await js(`void (window.smokeInput=text=>{const e=document.querySelector('.mention-editor');e.focus({preventScroll:true});const range=document.createRange();range.selectNodeContents(e);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);document.execCommand('insertText',false,text);});`);
+  try{await waitFor(`document.querySelector('.mention-editor') && document.querySelector('[data-event-id="${anchor}"]')`);}
   catch(error){console.error(await js("JSON.stringify({text:document.body.innerText.slice(0,800),rows:Array.from(document.querySelectorAll('[data-event-id]')).map(n=>n.dataset.eventId),top:document.querySelector('.conversation')?.scrollTop,height:document.querySelector('.conversation')?.scrollHeight})"));throw error;}
 }
-const timeout=setTimeout(()=>finish(new Error('Session UI smoke timed out')),45000);
+const timeout=setTimeout(()=>finish(new Error('Session UI smoke timed out')),120000);
 async function finish(error){
   if(finished)return;finished=true;clearTimeout(timeout);
   if(error && win && !win.isDestroyed()){
@@ -104,14 +119,19 @@ app.whenReady().then(async()=>{
   const {createServer}=await import(pathToFileURL(load.resolve('vite')).href);
   server=await createServer({root:project,cacheDir:path.join(home,'vite-cache'),server:{host:'127.0.0.1',port:0}});await server.listen();
   const url=`http://127.0.0.1:${server.httpServer.address().port}`;await openWindow(url);
-  await waitFor("document.querySelector('textarea').value==='草稿 A'");
+  await waitFor("window.smokePrompt==='草稿 A'");
+  // Settle the initial focus/selection scroll before measuring ordinary typing.
+  await input('草稿 A');
+  await js(`(async()=>{await document.fonts.ready;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));})()`);
   await new Promise(r=>setTimeout(r,450));
   const beforeTyping=viewSaves;
-  await js(`(()=>{window.positionScans=0;const pane=document.querySelector('.conversation'),original=pane.querySelectorAll.bind(pane);pane.querySelectorAll=(selector)=>{if(selector==='[data-event-id]')window.positionScans++;return original(selector);};})()`);
-  for(let i=0;i<12;i++)await input('连续输入 '+i);
+  await js(`(()=>{window.positionScans=0;window.positionScanStacks=[];const pane=document.querySelector('.conversation'),original=pane.querySelectorAll.bind(pane);pane.querySelectorAll=(selector)=>{if(selector==='[data-event-id]'){window.positionScans++;window.positionScanStacks.push(new Error().stack);}return original(selector);};})()`);
+  // Keep a typing burst within one browser task, independent of Electron IPC
+  // latency; otherwise a slow runner legitimately crosses the save debounce.
+  await js(`for(let i=0;i<12;i++)window.smokeInput('连续输入 '+i)`);
   await new Promise(r=>setTimeout(r,500));
   assert.ok(viewSaves-beforeTyping<=2, 'typing should coalesce save IPC');
-  assert.equal(await js('window.positionScans'),0,'typing should not scan conversation nodes');
+  assert.equal(await js('window.positionScans'),0,'typing should not scan conversation nodes: '+await js('JSON.stringify(window.positionScanStacks)'));
   await input('草稿 A');
   await revealEvent('event-47');
   const markdown="document.querySelector('[data-event-id=\"event-47\"]')";
@@ -170,9 +190,11 @@ app.whenReady().then(async()=>{
   assert.equal(await js("!!document.querySelector('.reference-modal')"),false);
   assert.equal(await js("document.elementFromPoint(document.querySelector('.mention-menu').getBoundingClientRect().left+20,document.querySelector('.mention-menu').getBoundingClientRect().top+20)?.closest('.mention-menu')!==null"),true);
   await key('ArrowDown');await key('Enter');
-  await waitFor("document.querySelector('.reference-chips').textContent.includes('src/second/index.vue · 整个文件')");
-  assert.equal(await js("document.querySelector('textarea').value"),'看看 src/second/index.vue ');
-  await js("Array.from(document.querySelectorAll('.reference-chips button')).find(e=>e.textContent.includes('src/second/index.vue')).click()");
+  await waitFor("Array.from(document.querySelectorAll('.reference-chips > span')).some(e=>e.title.endsWith('/src/second/index.vue') && e.textContent.includes('index.vue · 整个文件'))");
+  assert.equal(await js("window.smokePrompt"),'看看 src/second/index.vue ');
+  assert.equal(await js("document.querySelector('.inline-file-reference').dataset.referencePath"),'src/second/index.vue');
+  assert.equal(await js("document.querySelector('.inline-file-reference .reference-name').textContent"),'index.vue');
+  await js("Array.from(document.querySelectorAll('.reference-chips button')).find(e=>e.parentElement.title.endsWith('/src/second/index.vue')).click()");
   await waitFor("document.querySelector('.file-preview')?.textContent.includes('共 739 行')");
   assert.equal(await js("document.querySelector('select[aria-label=引用范围]').value"),'file');
   assert.equal(await js("document.querySelectorAll('.file-preview pre button').length"),100);
@@ -182,39 +204,39 @@ app.whenReady().then(async()=>{
   await js("Array.from(document.querySelectorAll('.reference-modal button')).find(e=>e.textContent==='引用整个文件').click()");
   await input('联系 mail@example.com');assert.equal(await js("!!document.querySelector('.mention-menu')"),false);
   await input('看看 @index');await waitFor("document.querySelectorAll('.mention-menu [role=option]').length===2");await key('Escape');
-  assert.equal(await js("!!document.querySelector('.mention-menu')"),false);assert.equal(await js("document.querySelector('textarea').value"),'看看 @index');
+  assert.equal(await js("!!document.querySelector('.mention-menu')"),false);assert.equal(await js("window.smokePrompt"),'看看 @index');
   await input('@binary');await waitFor("document.querySelectorAll('.mention-menu [role=option]').length===1");await key('Enter');
   await waitFor("document.querySelector('.mention-menu [role=alert]')?.textContent.includes('二进制')");
-  assert.equal(await js("document.querySelector('textarea').value"),'@binary');
+  assert.equal(await js("window.smokePrompt"),'@binary');
   await input('修改后的草稿 A');await js("document.querySelectorAll('.project-item')[1].click()");
-  await waitFor("document.querySelector('textarea').value==='草稿 B'");await input('修改后的草稿 B');
+  await waitFor("window.smokePrompt==='草稿 B'");await input('修改后的草稿 B');
   assert.equal(await js("!!document.querySelector('.context-usage')"),false);
-  await js("document.querySelectorAll('.project-item')[0].click()");await waitFor("document.querySelector('textarea').value==='修改后的草稿 A'");
+  await js("document.querySelectorAll('.project-item')[0].click()");await waitFor("window.smokePrompt==='修改后的草稿 A'");
   assert.match(await js("document.querySelector('.reference-chips').textContent"),/a.txt/);
   await waitFor("document.querySelector('[data-event-id=\"event-20\"]') && Math.abs(document.querySelector('[data-event-id=\"event-20\"]').getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top)<3");
-  await js("document.querySelector('.new-task').click()");await waitFor("document.querySelector('textarea').value===''");
+  await js("document.querySelector('.new-task').click()");await waitFor("window.smokePrompt===''");
   await input('新任务草稿');await js("document.querySelector('button[aria-label=\"发送任务\"]').click()");
-  await waitFor("document.querySelector('[role=alert]')?.textContent.includes('模拟提交失败')");assert.equal(await js("document.querySelector('textarea').value"),'新任务草稿');
-  failSubmit=false;await js("document.querySelector('button[aria-label=\"发送任务\"]').click()");await waitFor("document.querySelector('textarea').value===''");
-  await js("document.querySelector('.new-task').click()");assert.equal(await js("document.querySelector('textarea').value"),'');
+  await waitFor("document.querySelector('[role=alert]')?.textContent.includes('模拟提交失败')");assert.equal(await js("window.smokePrompt"),'新任务草稿');
+  failSubmit=false;await js("document.querySelector('button[aria-label=\"发送任务\"]').click()");await waitFor("window.smokePrompt===''");
+  await js("document.querySelector('.new-task').click()");assert.equal(await js("window.smokePrompt"),'');
   await js("Array.from(document.querySelectorAll('.task-item')).find(e=>e.title==='任务 A').click()");
-  await waitFor("document.querySelector('textarea').value==='修改后的草稿 A'");
+  await waitFor("window.smokePrompt==='修改后的草稿 A'");
   await waitFor("document.querySelector('[data-event-id=\"event-20\"]') && Math.abs(document.querySelector('[data-event-id=\"event-20\"]').getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top)<3");
   await input('关闭前最后草稿');await new Promise(resolve=>{win.once('closed',resolve);win.close();});
-  await openWindow(url);await waitFor("document.querySelector('textarea').value==='关闭前最后草稿'");
-  assert.match(await js("document.querySelector('.reference-chips').textContent"),/src\/second\/index.vue · 整个文件/);
+  await openWindow(url);await waitFor("window.smokePrompt==='关闭前最后草稿'");
+  assert.match(await js("document.querySelector('.reference-chips').textContent"),/index.vue · 整个文件/);
   await input('@index');await waitFor("document.querySelectorAll('.mention-menu [role=option]').length===2");
-  delayReference=true;await key('Enter');await waitFor("document.querySelector('textarea').readOnly");
+  delayReference=true;await key('Enter');await waitFor("document.querySelector('.mention-editor').getAttribute('aria-readonly')==='true'");
   await waitFor("document.querySelector('[data-event-id=\"event-20\"]') && Math.abs(document.querySelector('[data-event-id=\"event-20\"]').getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top)<3");
-  await js("document.querySelectorAll('.project-item')[1].click()");await waitFor("document.querySelector('textarea').value==='修改后的草稿 B'");
+  await js("document.querySelectorAll('.project-item')[1].click()");await waitFor("window.smokePrompt==='修改后的草稿 B'");
   await new Promise(r=>setTimeout(r,500));assert.equal(await js("!!document.querySelector('.reference-chips')"),false);
   await new Promise(resolve=>{win.once('closed',resolve);win.close();});
   const longId=randomUUID(), longTask=makeTask(longId,p);
-  longTask.title='长历史任务';
+  longTask.title='长历史任务';longTask.createdAt=3000;
   longTask.events=Array.from({length:10000},(_,i)=>({id:`long-${i}`,at:i,kind:i%3===0?'message':'notice',role:'assistant',text:i%3===0?'## 回复 '+i+'\n\n'+('不同高度的正文。'.repeat(i%9+1)): '进度 '+i}));
   longTask.events[990]={id:'long-call',at:990,kind:'tool',toolCallId:'long-tool',toolPhase:'call',text:'read_file {"path":"a.txt"}'};
   longTask.events[991]={id:'long-result',at:991,kind:'tool',toolCallId:'long-tool',toolPhase:'result',text:'read_file 结果\n'+('展开正文\n'.repeat(50))};
-  state.tasks.unshift(longTask,...Array.from({length:2000},(_,i)=>({...makeTask(randomUUID(),p),title:'列表任务 '+i,events:[]})));
+  state.tasks.unshift(longTask,...Array.from({length:2000},(_,i)=>({...makeTask(randomUUID(),p),title:'列表任务 '+i,createdAt:2001-i,events:[]})));
   session.update({...emptyView(p,longId),scroll:{top:0,follow:false,anchor:'long-1000',offset:-12,expanded:['long-call','long-result']}});session.flush();
   const beforeJump=eventRequests.length;await openWindow(url,'long-1000');
   await waitFor("Math.abs(document.querySelector('[data-event-id=\"long-1000\"]').getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top+12)<3");
@@ -251,7 +273,13 @@ app.whenReady().then(async()=>{
     await waitFor("document.querySelector('.conversation').scrollHeight-document.querySelector('.conversation').clientHeight-document.querySelector('.conversation').scrollTop<=4");
   }
   await js("document.querySelector('.task-item').focus();document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));");
-  await waitFor("document.activeElement.dataset.taskSelect==='2002'");
+  await waitFor("document.activeElement.dataset.taskSelect==='99'");
+  const beforeMore=taskPageRequests.length;
+  await js("Array.from(document.querySelectorAll('.task-list button')).find(b=>b.textContent==='加载更多任务').click()");
+  await waitFor("document.querySelector('.history-label span').textContent==='200'");
+  assert.ok(taskPageRequests.length>beforeMore);assert.ok(taskPageRequests.at(-1).cursor,'next task page uses a cursor');
+  await js("document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}))");
+  await waitFor("document.activeElement.dataset.taskSelect==='199'");
   await js("document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true}))");
   await waitFor("document.activeElement.dataset.taskSelect==='0'");
   const setField=(label,value)=>js(`(()=>{const field=document.querySelector('input[aria-label="${label}"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(field,${JSON.stringify(value)});field.dispatchEvent(new Event('input',{bubbles:true}));})()`);

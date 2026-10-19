@@ -174,6 +174,8 @@ jalo/
 | 入口 | 用途 |
 | --- | --- |
 | `npm test` | 执行 `tests/*.test.ts` 逻辑测试 |
+| `npm run setup:pty` | 显式准备 Linux 缺失的 node-pty 原生依赖，复用可加载模块 |
+| `npm run test:ui` | 使用临时数据和模拟 IPC 执行 Electron 会话界面回归 |
 | `npm run test:live` | 执行 `scripts/live.ts`，用临时项目验收真实模型 |
 | `scripts/reliability-live.ts` | 文本读取/修改与 Vue 元素修改专项实测 |
 | `scripts/session-smoke.cjs` | 使用临时数据和模拟任务操作 Electron 界面，检查会话恢复 |
@@ -183,6 +185,8 @@ jalo/
 构建时 Vite 输出 `dist/renderer/`，esbuild 输出 `dist/electron/main.cjs` 和 `worker.cjs`，并复制预加载文件。安装版入口使用生成的 `main.cjs`。
 
 按项目约定，日常修改不运行编译或打包；逻辑验证使用 `npm test`。真实模型验收只操作临时样例项目，不修改其他业务仓库。测试按模块分布，覆盖模型协议、执行循环、文件保护、上下文、数据库、引用、回退、IPC、会话与历史记录等行为。
+
+Linux 云端、macOS 原生行为与真实模型的验证范围及运行步骤见 [开发与验证](development.md)。
 
 ## 7. 常见改动从哪里入手
 
