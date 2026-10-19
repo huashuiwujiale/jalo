@@ -80,7 +80,7 @@ ipcMain.handle('task:rename',(event,input)=>{sender(event);const task=state.task
 ipcMain.handle('task:archive',(event,input)=>{sender(event);const task=state.tasks.find(task=>task.id===input.taskId);if(input.archived)task.archivedAt=Date.now();else delete task.archivedAt;fixtureUpdate(task);});
 const js=async code=>{try{return await win.webContents.executeJavaScript(code);}catch(error){console.error('Failed UI expression:',code);throw error;}};
 async function waitFor(condition){await js(`(async()=>{for(let i=0;i<400;i++){if(${condition})return;await new Promise(r=>setTimeout(r,25));}throw Error('界面条件未满足：'+${JSON.stringify(condition)});})()`);}
-const input=text=>js(`(()=>{const e=document.querySelector('.mention-editor');e.focus({preventScroll:true});const range=document.createRange();range.selectNodeContents(e);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);document.execCommand('insertText',false,${JSON.stringify(text)});})()`);
+const input=text=>js(`window.smokeInput(${JSON.stringify(text)})`);
 const key=name=>js(`document.querySelector('.mention-editor').dispatchEvent(new KeyboardEvent('keydown',{key:${JSON.stringify(name)},bubbles:true}))`);
 const anchorOffset=()=>js(`(()=>{const pane=document.querySelector('.conversation'),node=pane.querySelector('[data-event-id="event-20"]');return node.getBoundingClientRect().top-pane.getBoundingClientRect().top;})()`);
 async function revealEvent(id){
@@ -101,6 +101,7 @@ async function openWindow(url, anchor='event-20'){
   win=new BrowserWindow({show:true,width:1440,height:940,webPreferences:{preload:path.join(project,'electron/preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});
   await win.loadURL(url);
   await js(`(async()=>{const {editorText}=await import('/src/mention-editor.ts');Object.defineProperty(window,'smokePrompt',{get:()=>editorText(document.querySelector('.mention-editor'))});})()`);
+  await js(`void (window.smokeInput=text=>{const e=document.querySelector('.mention-editor');e.focus({preventScroll:true});const range=document.createRange();range.selectNodeContents(e);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);document.execCommand('insertText',false,text);});`);
   try{await waitFor(`document.querySelector('.mention-editor') && document.querySelector('[data-event-id="${anchor}"]')`);}
   catch(error){console.error(await js("JSON.stringify({text:document.body.innerText.slice(0,800),rows:Array.from(document.querySelectorAll('[data-event-id]')).map(n=>n.dataset.eventId),top:document.querySelector('.conversation')?.scrollTop,height:document.querySelector('.conversation')?.scrollHeight})"));throw error;}
 }
@@ -125,7 +126,9 @@ app.whenReady().then(async()=>{
   await new Promise(r=>setTimeout(r,450));
   const beforeTyping=viewSaves;
   await js(`(()=>{window.positionScans=0;window.positionScanStacks=[];const pane=document.querySelector('.conversation'),original=pane.querySelectorAll.bind(pane);pane.querySelectorAll=(selector)=>{if(selector==='[data-event-id]'){window.positionScans++;window.positionScanStacks.push(new Error().stack);}return original(selector);};})()`);
-  for(let i=0;i<12;i++)await input('连续输入 '+i);
+  // Keep a typing burst within one browser task, independent of Electron IPC
+  // latency; otherwise a slow runner legitimately crosses the save debounce.
+  await js(`for(let i=0;i<12;i++)window.smokeInput('连续输入 '+i)`);
   await new Promise(r=>setTimeout(r,500));
   assert.ok(viewSaves-beforeTyping<=2, 'typing should coalesce save IPC');
   assert.equal(await js('window.positionScans'),0,'typing should not scan conversation nodes: '+await js('JSON.stringify(window.positionScanStacks)'));
