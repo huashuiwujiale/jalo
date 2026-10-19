@@ -10,7 +10,16 @@ import { commandOutput } from '../engine/command-output';
 import { ToolRegistry } from '../engine/tools';
 import type { CommandSession, Approval } from '../shared/types';
 
-async function until(check: () => boolean) { for (let i = 0; i < 300; i++) { if (check()) return; await new Promise(r => setTimeout(r, 10)); } assert.ok(check(), 'terminal did not reach expected state'); }
+async function until(check: () => boolean | Promise<boolean>) { for (let i = 0; i < 300; i++) { if (await check()) return; await new Promise(r => setTimeout(r, 10)); } assert.ok(await check(), 'terminal did not reach expected state'); }
+async function exited(pid: number) {
+  try { process.kill(pid, 0); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true; throw error; }
+  if (process.platform !== 'linux') return false;
+  // Container PID 1 may leave a killed orphan unreaped. A zombie cannot run;
+  // kill(pid, 0) still succeeds until its process-table entry is reaped.
+  try { return /\)\s+Z\s/.test(await fs.readFile(`/proc/${pid}/stat`, 'utf8')); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true; throw error; }
+}
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'jalo-pty-'));
   const owner = { taskId: randomUUID(), runId: randomUUID(), projectId: randomUUID() }, records = new Map<string, CommandSession>();
@@ -45,7 +54,7 @@ test('stopping a PTY kills the process group; foreground timeouts and shutdown p
     const id = [...x.records.keys()][0]; await until(() => /CHILD:\d+/.test(x.manager.snapshot(x.owner, id).tail!));
     const pid = Number(x.records.get(id)!.tail!.match(/CHILD:(\d+)/)![1]);
     x.manager.stop(x.owner, id); assert.equal(x.records.get(id)!.status, 'interrupted');
-    await until(() => { try { process.kill(pid, 0); return false; } catch { return true; } });
+    await until(() => exited(pid));
     const result = await x.manager.start(x.owner, x.approval('sleep 60', false, 0.1), x.directory);
     assert.match(result, /超时/); assert.equal([...x.records.values()].at(-1)!.timedOut, true);
     await x.manager.start(x.owner, x.approval('sleep 60'), x.directory); x.manager.shutdown();

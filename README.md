@@ -66,6 +66,8 @@ npm run dev
 
 如果项目已有 `node_modules`，可直接 `npm run dev`。启动脚本会启动本地 Vite 服务及 Electron 窗口；没有编译、打包步骤。开发服务使用 `127.0.0.1:5173`，端口被占用时明确报错。
 
+Linux 云端运行终端测试时，`node-pty` 没有随包提供 Linux 预编译文件。安装 Python、make、C++ 编译器和 zsh 后，显式运行 `npm run setup:pty`，仅准备这个原生依赖，不编译或打包 Jalo。已可加载的依赖会直接复用；使用 `npm ci --ignore-scripts` 的环境还须先运行 `node node_modules/esbuild/install.js`，桌面测试另须运行 `node node_modules/electron/install.js`。
+
 1. 在 LM Studio 中下载支持工具调用的模型，启动 Developer 页的本地服务器。
 2. 打开“模型与设置”，选择 LM Studio，填写地址（默认 `http://127.0.0.1:1234`）及可选令牌，保存并检测连接。
 3. 选择默认模型并保存。可手动加载/卸载；开始任务时也会加载尚未加载的模型。

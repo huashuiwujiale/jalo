@@ -15,6 +15,7 @@
   "main": "electron/bootstrap.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "setup:pty": "node scripts/setup-pty.mjs",
     "test": "tsx --test tests/*.test.ts",
     "test:live": "tsx scripts/live.ts",
     "build": "node scripts/build.mjs",
