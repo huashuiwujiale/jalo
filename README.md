@@ -211,10 +211,12 @@ npm run test:live
 会话界面回归检查（临时数据、模拟任务、Vite 开发服务，不编译或打包）：
 
 ```bash
-env -u ELECTRON_RUN_AS_NODE ./node_modules/electron/dist/Electron.app/Contents/MacOS/Electron scripts/session-smoke.cjs
+npm run test:ui
 ```
 
 该检查实际操作 Electron 界面，验证 Markdown、代码复制、链接、保存计划、流式展示、跨项目草稿与引用、滚动锚点和工具展开状态、提交失败/成功以及窗口重开。复制与网页打开使用模拟处理器，不改变系统剪贴板或打开外部网页；不会读取现有任务数据库或连接模型服务。
+
+Linux 依赖准备、无显示器界面回归，以及需要在 Mac 上单独完成的验收，见 [开发与验证](docs/development.md)。
 
 真实模型测试只创建临时加法样例，读取并修复后请求执行 `node --version`，终端输入 `yes` 才执行。模型通过 `LM_STUDIO_MODEL` 指定；地址与令牌可用 `LM_STUDIO_URL` 和 `LM_STUDIO_TOKEN` 环境变量传入。测试加载的模型在结束时卸载，原先已加载的实例保留。
 

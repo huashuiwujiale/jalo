@@ -1,7 +1,7 @@
 # 开发约定
 
 - Jalo 是佳乐（Jiale）发起的独立 macOS 本地编程助手，使用 LM Studio 作为模型服务。
-- 按用户要求，不运行编译或打包。逻辑验证运行 `npm test`。
+- 按用户要求，不运行 Jalo 应用编译或打包。逻辑验证运行 `npm test`；界面改动运行 `npm run test:ui`，平台要求见 `docs/development.md`。Linux 可显式运行 `npm run setup:pty`，仅编译缺失的 node-pty 原生依赖。
 - 使用 Node.js 22.14+，不要使用系统默认的旧版 Node。
 - 保留每条终端命令的用户确认，不将模型普通回复解析为可执行代码。
 - 文件工具须限制在所选项目内，保留修改前备份和外部修改检查。
