@@ -14,6 +14,7 @@ load('tsx/cjs');
 const { SessionStore } = load('./electron/session.ts');
 const { emptyView, viewSchema } = load('./shared/session.ts');
 const { defaults } = load('./shared/types.ts');
+const { settingsSchema } = load('./shared/validation.ts');
 const { taskSummary, taskDetail } = load('./shared/task-wire.ts');
 const { filterTasks, pageTaskEvents } = load('./shared/task-history.ts');
 const projectFiles = load('./engine/project-files.ts');
@@ -51,6 +52,9 @@ ipcMain.handle('files:list',(event,input)=>{sender(event);return projectFiles.li
 ipcMain.handle('files:preview',(event,input)=>{sender(event);return projectFiles.previewFile(fixture(input.projectId).path,input.path,input.startLine);});
 ipcMain.handle('files:reference',async(event,input)=>{sender(event);if(delayReference)await new Promise(r=>setTimeout(r,400));return projectFiles.referenceFile(fixture(input.projectId),input.path);});
 ipcMain.handle('app:snapshot',event=>{sender(event);return catalog();});
+ipcMain.handle('app:info',event=>{sender(event);return {version:load('./package.json').version,packaged:false,platform:process.platform,arch:process.arch,electron:process.versions.electron,chrome:process.versions.chrome,node:process.versions.node,osRelease:os.release(),dataDirectory:home,logDirectory:path.join(home,'logs'),logsAvailable:true};});
+ipcMain.handle('models:list',event=>{sender(event);return [];});
+ipcMain.handle('settings:save',(event,input)=>{sender(event);state.settings=settingsSchema.parse(input);win.webContents.send('app:update',{sequence:++sequence,tasks:[],settings:state.settings});});
 ipcMain.handle('task:detail',(event,id)=>{sender(event);return taskDetail(state.tasks.find(task=>task.id===id),revisions.get(id)||0);});
 ipcMain.handle('task:summary',(event,id)=>{sender(event);return taskSummary(state.tasks.find(task=>task.id===id),revisions.get(id)||0);});
 const taskPageRequests=[];
@@ -111,7 +115,7 @@ async function finish(error){
   if(error && win && !win.isDestroyed()){
     try{console.error('UI failure state',await js("JSON.stringify({top:document.querySelector('.conversation')?.scrollTop,height:document.querySelector('.conversation')?.scrollHeight,rows:Array.from(document.querySelectorAll('[data-event-id]')).map(n=>[n.dataset.eventId,n.getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top]),spacers:Array.from(document.querySelector('.virtual-timeline')?.children||[]).filter(n=>!n.dataset.rowId).map(n=>n.style.height)})"));console.error('Saved selection',session.read().state.selected,session.read().state.views[Object.keys(session.read().state.views).find(k=>k===`${p}:${t}`)]?.scroll);}catch{}}
   win?.destroy();session.flush();await server?.close();fs.rmSync(home,{recursive:true,force:true});
-  if(error)console.error(error);else console.log('Session UI smoke passed: Markdown, streaming, drafts, window restart, 10000-event anchor jump, bounded cache/DOM, resize, expanded cards, live follow and 2000-task navigation/search/rename/archive');
+  if(error)console.error(error);else console.log('Session UI smoke passed: Markdown, streaming, drafts, window restart, 10000-event anchor jump, bounded cache/DOM, resize, expanded cards, live follow, 2000-task navigation/search/rename/archive and provider logos/selection/save/locking');
   app.exit(error?1:0);
 }
 app.on('window-all-closed',()=>{});
@@ -294,4 +298,49 @@ app.whenReady().then(async()=>{
   await waitFor("document.querySelector('.task-item')?.title==='列表任务 1999 已重命名'");
   await js("document.querySelector('button[aria-label=\"恢复任务：列表任务 1999 已重命名\"]').click()");await waitFor("!document.querySelector('.task-item')");
   await js("document.querySelectorAll('.history-tabs button')[0].click()");await waitFor("document.querySelector('.task-item')?.title==='列表任务 1999 已重命名'");
+  await js("document.querySelector('.sidebar-bottom button').click()");
+  await waitFor("document.querySelector('.provider-select-trigger')?.textContent==='LM Studio'");
+  await waitFor("document.querySelector('.provider-select-trigger img').naturalWidth>0");
+  await js("document.querySelector('.provider-select-trigger').click()");
+  await waitFor("document.querySelectorAll('.provider-menu [role=option]').length===2 && Array.from(document.querySelectorAll('.provider-menu img')).every(img=>img.complete && img.naturalWidth>0)");
+  assert.deepEqual(await js("Array.from(document.querySelectorAll('.provider-menu [role=option]')).map(e=>e.textContent)"),['LM Studio','Ollama']);
+  assert.equal(await js("document.querySelector('.provider-menu [aria-selected=true]').textContent"),'LM Studio');
+  assert.ok(await js("Array.from(document.querySelectorAll('.provider-menu img')).every(img=>{const r=img.getBoundingClientRect();return r.width===22 && r.height===22;})"));
+  const providerKey=name=>js(`document.querySelector('.provider-menu').dispatchEvent(new KeyboardEvent('keydown',{key:${JSON.stringify(name)},bubbles:true}))`);
+  await providerKey('End');await providerKey('Escape');
+  assert.equal(await js("document.querySelector('.provider-select-trigger').textContent"),'LM Studio');
+  assert.equal(await js("document.activeElement===document.querySelector('.provider-select-trigger')"),true);
+  await js("document.querySelector('.provider-select-trigger').click()");await waitFor("!!document.querySelector('.provider-menu')");
+  win.webContents.sendInputEvent({type:'keyDown',keyCode:'Tab'});win.webContents.sendInputEvent({type:'keyUp',keyCode:'Tab'});
+  await waitFor("!document.querySelector('.provider-menu') && document.activeElement===document.querySelector('.settings-modal fieldset input')");
+  await js("(()=>{const e=document.querySelector('.settings-modal input[type=password]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'fixture-token');e.dispatchEvent(new Event('input',{bubbles:true}));})()");
+  await js("document.querySelector('.provider-select-trigger').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}))");
+  await waitFor("!!document.querySelector('.provider-menu')");await providerKey('End');await providerKey('Enter');
+  await waitFor("document.querySelector('.provider-select-trigger').textContent==='Ollama'");
+  assert.equal(await js("document.querySelector('.settings-modal fieldset input').value"),'http://127.0.0.1:11434');
+  assert.equal(await js("document.querySelector('.settings-modal input[type=password]').value"),'');
+  assert.equal(await js("document.querySelector('.settings-modal select').value"),'');
+  await js("document.querySelector('.provider-select-trigger').click()");
+  await waitFor("!!document.querySelector('.provider-menu')");
+  if(process.env.JALO_PROVIDER_SCREENSHOT){await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');fs.writeFileSync(process.env.JALO_PROVIDER_SCREENSHOT,(await win.webContents.capturePage()).toPNG());}
+  await js("document.querySelector('.settings-section-heading').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))");
+  await waitFor("!document.querySelector('.provider-menu')");
+  await js("document.querySelector('.settings-modal > footer button').click()");await waitFor("!document.querySelector('.settings-modal')");
+  assert.equal(state.settings.provider,'ollama');assert.equal(state.settings.baseUrl,'http://127.0.0.1:11434');
+  await js("document.querySelector('.sidebar-bottom button').click()");await waitFor("document.querySelector('.provider-select-trigger')?.textContent==='Ollama'");
+  await js("document.querySelector('.provider-select-trigger').click()");await waitFor("!!document.querySelector('.provider-menu')");
+  await providerKey('Home');await providerKey('Enter');await waitFor("document.querySelector('.provider-select-trigger').textContent==='LM Studio'");
+  assert.equal(await js("document.querySelector('.settings-modal fieldset input').value"),'http://127.0.0.1:1234');
+  await js("document.querySelector('.provider-select-trigger').click()");await waitFor("!!document.querySelector('.provider-menu')");
+  longTask.status='running';fixtureUpdate(longTask);
+  await waitFor("document.querySelector('.provider-select-trigger').disabled && !document.querySelector('.provider-menu')");
+  longTask.status='completed';fixtureUpdate(longTask);
+  await waitFor("!document.querySelector('.provider-select-trigger').disabled");
+  for(const name of ['Ollama','LM Studio']){
+    await js("document.querySelector('.provider-select-trigger').click()");await waitFor("!!document.querySelector('.provider-menu')");
+    await js(`Array.from(document.querySelectorAll('.provider-menu [role=option]')).find(e=>e.textContent===${JSON.stringify(name)}).click()`);
+    await waitFor(`!document.querySelector('.provider-menu') && document.querySelector('.provider-select-trigger').textContent===${JSON.stringify(name)}`);
+  }
+  await js("document.querySelector('.settings-modal > footer button').click()");await waitFor("!document.querySelector('.settings-modal')");
+  assert.equal(state.settings.provider,'lmstudio');
 }).then(()=>finish()).catch(finish);

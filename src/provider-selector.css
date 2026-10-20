@@ -1,0 +1,11 @@
+.provider-field { margin-bottom:13px; font-size:11px; color:#758079; }
+.provider-select-trigger { display:flex; width:100%; gap:10px; margin-top:7px; padding:9px 11px; border:1px solid #dce3df; border-radius:6px; background:#fff; color:#252a32; font-size:12px; text-align:left; }
+.provider-select-trigger > span { flex:1; }
+.provider-select-trigger:focus-visible { outline:2px solid #3f826c; outline-offset:3px; }
+.provider-logo { display:block; width:22px; height:22px; flex-shrink:0; object-fit:contain; }
+.provider-menu { position:fixed; z-index:65; padding:6px; max-height:calc(100vh - 24px); overflow:auto; border:1px solid #dce3df; border-radius:10px; background:#fafbfc; color:#252a32; box-shadow:0 10px 35px #17282326; outline:none; }
+.provider-menu > button { display:flex; width:100%; min-height:44px; padding:8px 10px; gap:11px; border-radius:6px; text-align:left; font-size:12px; }
+.provider-menu > button > span { flex:1; }
+.provider-menu > button.active { background:#e6eee8; }
+.provider-menu > button > svg { color:#476653; }
+@media (forced-colors:active) { .provider-menu > button.active { outline:1px solid Highlight; } }
