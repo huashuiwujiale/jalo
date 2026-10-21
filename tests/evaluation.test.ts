@@ -62,6 +62,18 @@ test('real tool loop passes all fixtures, uses structured Vue edit and stores ef
   assert.ok(report.cases.every(c=>c.durationMs!==undefined && c.checks.every(check=>check.passed)));
   assert.doesNotMatch(JSON.stringify(report),/secret-token/);
 });
+test('evaluation captures reasoning choice so later settings do not change a saved run', async () => {
+  const report = newEvaluation(randomUUID(), { ...config, lmStudioReasoning: 'off' }, 'test');
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'jalo-eval-reasoning-'));
+  let effective: string | undefined;
+  await runEvaluation(report, { ...config, lmStudioReasoning: 'auto' }, home, new AbortController().signal, () => {}, settings => {
+    effective = settings.lmStudioReasoning; return new FixtureModel();
+  });
+  assert.equal(effective, 'off'); assert.equal(report.parameters.lmStudioReasoning, 'off');
+  assert.ok(report.cases.every(c => c.status === 'passed'));
+  const html = renderToStaticMarkup(React.createElement(ModelEvaluation, { reports: [report], api: {} as any, disabled: false, model: 'mock', start: async () => {}, fail: () => {} }));
+  assert.match(html, /思考关闭/);
+});
 test('model claims, wrong element deletion and terminal attempts cannot pass disk verification',async()=>{
   const fake=await evaluate(new FixtureModel('fake'));assert.ok(fake.cases.every(c=>c.status==='failed'));
   const wrong=await evaluate(new FixtureModel('wrong-vue'));assert.equal(wrong.cases[1].status,'passed');assert.equal(wrong.cases[2].status,'failed');

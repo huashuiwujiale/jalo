@@ -370,11 +370,12 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     const gapDb=new DatabaseSync(path.join(userData,'local-code.sqlite'),{readOnly:true});
     const gapStored=JSON.parse(String(gapDb.prepare('SELECT data FROM tasks WHERE id=?').get(gapId)!.data));
     assert.equal(gapStored.messages.length,1);assert.equal(gapStored.messages[0].content,'message protocol gap');gapDb.close();
-    const followTask = await invoke('task:submit',{projectId:project.id,prompt:'完成后追加',mode:'plan'});
+    const followTask = await invoke('task:submit',{projectId:project.id,prompt:'完成后追加',mode:'plan',thinking:'off'});
     const followWorker=workers.at(-1), followRun=(await invoke('task:detail',followTask)).currentRunId;
     await invoke('task:followup',{taskId:followTask,prompt:'这是自动开始的下一轮',kind:'queue'});
     followWorker.emit('message',{type:'done',status:'completed',runId:followRun,result:'计划完成'});
     for(let i=0;i<50&&workers.at(-1)===followWorker;i++)await new Promise(r=>setTimeout(r,5));
+    assert.equal(workers.at(-1).sent.find((m:any)=>m.type==='start').settings.thinking,'off');
     const resumedContext=await invoke('task:detail',followTask);assert.notEqual(resumedContext.currentRunId,followRun);assert.equal(resumedContext.runs.at(-1).input,'这是自动开始的下一轮');assert.equal(resumedContext.followups.length,0);
     await invoke('task:followup',{taskId:followTask,prompt:'停止后保留，不自动运行',kind:'queue'});
     const stopWorker=workers.at(-1), countBeforeStop=workers.length;
@@ -387,9 +388,9 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await assert.rejects(invoke('task:submit',{projectId:project.id,prompt:'no model'}),/选择模型/);
     await invoke('task:submit',{projectId:project.id,taskId:gapId,prompt:'continue with A',model:'model-a'});
     const modelAWorker=workers.at(-1);
-    const modelBInput={projectId:project.id,prompt:'queued B',model:'model-b'};
+    const modelBInput={projectId:project.id,prompt:'queued B',model:'model-b',thinking:'off'};
     const modelBId=await invoke('task:submit',modelBInput);
-    modelBInput.model='changed-after-submit';
+    modelBInput.model='changed-after-submit';modelBInput.thinking='on';
     const queued=(await snapshot()).tasks.find((t:any)=>t.id===modelBId);
     assert.equal(queued.status,'queued');assert.equal(queued.model,'model-b');assert.equal(queued.runs[0].model,'model-b');
     assert.equal((await invoke('app:snapshot')).settings.model,'');
@@ -406,6 +407,7 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await new Promise(r=>setImmediate(r));
     await new Promise(r=>setImmediate(r));
     const modelBWorker=workers.at(-1), modelBStart=modelBWorker.sent.find((m:any)=>m.type==='start');
+    assert.equal(modelBStart.settings.thinking,'off');assert.equal(queued.runs[0].thinking,'off');
     assert.equal(modelBStart.input.model,'model-b');assert.equal(modelBStart.settings.model,'model-b');
     assert.equal(modelBStart.settings.provider,'ollama');assert.equal(modelBStart.settings.baseUrl,'http://127.0.0.1:11434');
     modelBWorker.emit('message',{type:'done',runId:queued.currentRunId,status:'completed'});
@@ -424,9 +426,10 @@ test('main IPC creates linked runs, persists checkpoints before acknowledgement,
     await assert.rejects(invoke('task:resume',{taskId:resumeId,runId:resumeRun,version:'a'.repeat(64),goal:prepared.goal}),/摘要或文件已变化/);
     await assert.rejects(invoke('task:submit',{taskId:resumeId,projectId:project.id,prompt:prepared.goal,mode:'execute',continuation:{runId:resumeRun,version:prepared.version}}),/续接目标已变化/);
     const historyBefore=(await invoke('task:detail',resumeId)).eventCount;
-    await invoke('task:resume',{taskId:resumeId,runId:resumeRun,version:prepared.version,goal:'保留文件，只分析未完成部分，不要编译',model:'resume-model'});
+    await invoke('task:resume',{taskId:resumeId,runId:resumeRun,version:prepared.version,goal:'保留文件，只分析未完成部分，不要编译',model:'resume-model',thinking:'on'});
     await new Promise(resolve=>setImmediate(resolve));
     const continued=await invoke('task:detail',resumeId), continuedWorker=workers.at(-1), continuedInput=continuedWorker.sent.find((m:any)=>m.type==='start').input;
+    assert.equal(continuedWorker.sent.find((m:any)=>m.type==='start').settings.thinking,'on');
     assert.equal(continued.runs.length,2);assert.equal(continued.runs[1].continuation.runId,resumeRun);assert.equal(continued.runs[1].mode,'plan');assert.equal(continued.model,'resume-model');
     assert.ok(continued.eventCount>historyBefore);assert.equal(continuedInput.messages.length,1);assert.match(continuedInput.messages[0].content,/不得重放历史工具或命令/);assert.ok(!continuedInput.messages.some((m:any)=>m.tool_calls));
     const continuationDb=new DatabaseSync(path.join(userData,'local-code.sqlite'),{readOnly:true});

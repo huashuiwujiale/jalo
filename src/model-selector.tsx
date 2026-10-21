@@ -5,7 +5,7 @@ import type { Api, LocalModel } from '../shared/types';
 import { findLocalModel, modelSelectionError } from '../shared/models';
 import './model-selector.css';
 
-export interface ModelValidation { service: string; model: string; error: string }
+export interface ModelValidation { service: string; model: string; error: string; thinking?: LocalModel['thinking'] }
 export function ModelSelector({ api, value, defaultModel, service, disabled, onChange, onValidation, settings }: {
   api: Pick<Api, 'models'>; value: string; defaultModel: string; service: string; disabled: boolean;
   onChange: (model: string) => void; onValidation: (validation: ModelValidation) => void; settings: () => void;
@@ -42,13 +42,14 @@ export function ModelSelector({ api, value, defaultModel, service, disabled, onC
     if (disabled || !option || option.disabled) return;
     onChange(option.value); close(true);
   }
-  useEffect(() => { onValidation({ service, model: effective, error: problem }); }, [service, effective, problem, onValidation]);
+  useEffect(() => { onValidation({ service, model: effective, error: problem, thinking: current?.thinking }); }, [service, effective, problem, current, onValidation]);
   useEffect(() => {
     if (!open || disabled) return;
     void refresh();
     return () => { generation.current++; };
   }, [open, service, disabled, api]);
   useEffect(() => { if (disabled) close(); }, [disabled]);
+  useEffect(() => { void refresh(); return () => { generation.current++; }; }, [service, api, disabled]);
   useLayoutEffect(() => {
     if (!open) return;
     const selected = options.findIndex(option => isSelected(option.value) && !option.disabled);

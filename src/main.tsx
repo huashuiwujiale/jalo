@@ -38,6 +38,7 @@ function App() {
   const [prompt, setPrompt] = useState('');
   const [mode, setMode] = useState<Mode>('execute');
   const [model, setModel] = useState('');
+  const [thinking, setThinking] = useState<'auto' | 'on' | 'off'>('auto');
   const [modelValidation, setModelValidation] = useState<ModelValidation>();
   const [references, setReferences] = useState<FileReference[]>([]);
   const [picker, setPicker] = useState<{ path?: string; line?: number }>();
@@ -127,6 +128,9 @@ function App() {
     pendingPosition.current = { ...captureCurrent(), top: 0, follow: true, anchor: undefined, offset: undefined };
     setViewRevision(n => n + 1); await history.loadLatest();
   }
+  const thinkingCapability = modelValidation?.service === modelService && modelValidation.model === effectiveModel ? modelValidation.thinking : undefined;
+  const thinkingOn = thinking === 'on' || (thinking === 'auto' && (state.settings.provider !== 'ollama' && state.settings.lmStudioReasoning === 'off' ? false : thinkingCapability?.default !== false));
+  const requestThinking = thinkingCapability ? thinking : 'auto';
   function persistView(view: SessionView) {
     saver.current!.schedule(view);
   }
@@ -146,7 +150,7 @@ function App() {
     currentView.current = view; pendingPosition.current = view.scroll;
     expanded.current = new Set(view.scroll.expanded);
     expandedGroups.current.clear();
-    setProjectId(view.projectId); setTaskId(view.taskId); setPrompt(view.prompt); setMode(view.mode); setModel(view.model ?? ''); setModelValidation(undefined); setReferences(view.references); setGitReview(view.gitReview);
+    setProjectId(view.projectId); setTaskId(view.taskId); setPrompt(view.prompt); setMode(view.mode); setModel(view.model ?? ''); setThinking(view.thinking || 'auto'); setModelValidation(undefined); setReferences(view.references); setGitReview(view.gitReview);
     setContinuationOpen(false); setRunId(view.runId); setTab(view.tab); setPicker(undefined); setSelectedFile(''); setError('');
     setViewRevision(value => value + 1);
   }
@@ -177,9 +181,9 @@ function App() {
   }, [sessionReady, viewRevision, history.restoring, history.loading, history.events, task?.id]);
   useLayoutEffect(() => {
     if (!sessionReady) return;
-    currentView.current = { projectId,taskId,prompt,mode,model,references,gitReview,runId,tab,scroll:pendingPosition.current || currentView.current.scroll };
+    currentView.current = { projectId,taskId,prompt,mode,model,thinking,references,gitReview,runId,tab,scroll:pendingPosition.current || currentView.current.scroll };
     persistView(currentView.current);
-  }, [sessionReady,viewRevision,projectId,taskId,prompt,mode,model,references,gitReview,runId,tab]);
+  }, [sessionReady,viewRevision,projectId,taskId,prompt,mode,model,thinking,references,gitReview,runId,tab]);
   useEffect(() => {
     if (!sessionReady) return;
     const flush = () => {
@@ -230,9 +234,9 @@ function App() {
     setSending(true); setError('');
     const submitted = { ...currentView.current };
     try {
-      const id = await api.submit({ projectId, model: effectiveModel, prompt: planRunId ? '按关联计划执行，先重新读取文件，再完成修改和核验。' : prompt, mode: planRunId ? 'execute' : mode, references: planRunId ? [] : references, ...(planRunId ? { planRunId } : {}), ...(mode === 'review' && !planRunId ? reviewTarget ? { gitReview: reviewTarget } : run ? { reviewRunId: run.id } : {} : {}), ...(taskId ? { taskId } : {}) });
+      const id = await api.submit({ projectId, model: effectiveModel, thinking: requestThinking, prompt: planRunId ? '按关联计划执行，先重新读取文件，再完成修改和核验。' : prompt, mode: planRunId ? 'execute' : mode, references: planRunId ? [] : references, ...(planRunId ? { planRunId } : {}), ...(mode === 'review' && !planRunId ? reviewTarget ? { gitReview: reviewTarget } : run ? { reviewRunId: run.id } : {} : {}), ...(taskId ? { taskId } : {}) });
       const next: SessionView = { ...submitted, taskId:id, runId:'', mode:planRunId ? 'execute' : mode, prompt:planRunId ? submitted.prompt : '', references:planRunId ? submitted.references : [], gitReview:undefined, scroll:emptyView(projectId).scroll };
-      if(!submitted.taskId)persistView({...next,taskId:'',model:''});
+      if(!submitted.taskId)persistView({...next,taskId:'',model:'',thinking:'auto'});
       saver.current!.flush(); openView(next,false);
     } catch (e) { fail(e); }
     finally { setSending(false); }
@@ -286,7 +290,7 @@ function App() {
         <div className={`composer ${composerLocked ? 'busy' : ''}`}><MentionInput key={`${projectId}:${taskId}`} api={api} project={project} placeholder={task?.archivedAt ? '恢复任务后可继续对话' : isBusy ? '补充文字要求：排队发送或调整当前任务…' : '描述任务，输入 @ 引用文件…'} value={prompt} references={references} disabled={composerLocked || sending} canAdd={!isBusy && references.length < 8} onChange={setPrompt} onChoose={ref=>setReferences(old=>[...old.filter(r=>!(r.projectId===ref.projectId && r.path===ref.path)),ref].slice(0,8))} onPending={setReferencePending} submit={()=>void submit()}/><div className="composer-toolbar"><label className="composer-project" title={project?.path || '选择任务所在项目'}><Folder size={13}/><select aria-label="切换任务项目" value={projectId} disabled={sending || !state.projects.length} onChange={e => chooseProject(e.target.value)}>
           {!projectId && <option value="" disabled>未选择项目</option>}
           {state.projects.map(p => <option key={p.id} value={p.id}>{state.projects.filter(other => other.name === p.name).length > 1 ? `${p.name} — ${p.path}` : p.name}</option>)}
-        </select><ChevronDown size={12}/></label><div className="composer-actions"><ModelSelector key={`${projectId}:${taskId}`} api={api} value={model} defaultModel={state.settings.model} service={modelService} disabled={sending || composerLocked || isBusy || !!evaluating} onChange={setModel} onValidation={setModelValidation} settings={() => setSettingsOpen(true)}/>{isBusy ? <><select aria-label="追加要求方式" value={followupKind} onChange={e => setFollowupKind(e.target.value as 'queue' | 'steer')}><option value="queue">排队发送</option><option value="steer" disabled={selected?.status === 'queued'}>调整当前任务</option></select><button className="send" aria-label="发送追加要求" disabled={sending || !prompt.trim()} onClick={() => void submit()}><ArrowUp size={16}/></button><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[selected!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(selected!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || referencePending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
+        </select><ChevronDown size={12}/></label><div className="composer-actions"><ModelSelector key={`${projectId}:${taskId}`} api={api} value={model} defaultModel={state.settings.model} service={modelService} disabled={sending || composerLocked || isBusy || !!evaluating} onChange={setModel} onValidation={setModelValidation} settings={() => setSettingsOpen(true)}/>{thinkingCapability && <button type="button" className="composer-thinking" aria-label="切换思考" aria-pressed={thinkingOn} disabled={sending || composerLocked || isBusy || !!evaluating} title="切换本聊天的思考模式；下次发送生效，运行中的任务保持不变" onClick={() => setThinking(thinkingOn ? 'off' : 'on')}>思考{thinkingOn ? '开' : '关'}</button>}{isBusy ? <><select aria-label="追加要求方式" value={followupKind} onChange={e => setFollowupKind(e.target.value as 'queue' | 'steer')}><option value="queue">排队发送</option><option value="steer" disabled={selected?.status === 'queued'}>调整当前任务</option></select><button className="send" aria-label="发送追加要求" disabled={sending || !prompt.trim()} onClick={() => void submit()}><ArrowUp size={16}/></button><span className="working-label"><LoaderCircle size={12} className="spin"/>{statusText[selected!.status]}</span><button className="send stop" aria-label="停止任务" onClick={() => api.stop(selected!.id).catch(fail)}><Square size={14}/></button></> : <><span className="shortcut">⌘ ↵ 发送</span><button className="send" aria-label="发送任务" disabled={!prompt.trim() || sending || referencePending || invalidReferences || composerLocked} onClick={() => submit()}>{sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}</button></>}</div></div></div>
         <div className="composer-caption"><ShieldCheck size={12}/>推理由你配置的 {modelServiceName(state.settings)} 提供<span>Jalo / 开发版</span></div>
       </div>
     </main>
@@ -296,7 +300,7 @@ function App() {
     </aside>
     {error && <div className="toast" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={() => setError('')}><X size={16}/></button></div>}
     {picker && project && <FilePicker key={project.id} project={project} initialPath={picker.path} initialLine={picker.line} initialReference={references.find(r=>r.projectId===project.id && r.path===picker.path)} close={() => setPicker(undefined)} choose={ref => { setReferences(old => [...old.filter(r => !(r.projectId === ref.projectId && r.path === ref.path)), ref].slice(0, 8)); setPicker(undefined); }}/>}
-    {continuationOpen && task && <ContinuationDialog key={task.id} api={api} taskId={task.id} extraGoal={prompt} model={effectiveModel} close={() => setContinuationOpen(false)} resumed={() => { setContinuationOpen(false); setPrompt(''); setReferences([]); setGitReview(undefined); setRunId(''); setMode(task.mode || 'execute'); }}/>}
+    {continuationOpen && task && <ContinuationDialog key={task.id} api={api} taskId={task.id} extraGoal={prompt} model={effectiveModel} thinking={requestThinking} close={() => setContinuationOpen(false)} resumed={() => { setContinuationOpen(false); setPrompt(''); setReferences([]); setGitReview(undefined); setRunId(''); setMode(task.mode || 'execute'); }}/>}
     {settingsOpen && <SettingsDialog state={state} close={() => setSettingsOpen(false)} fail={fail}/>}
     {removingProject && <RemoveProjectDialog project={removingProject} close={() => setRemovingProject(undefined)} fail={fail} removed={() => {
       if (removingProject.id === projectId) { const remaining={...state,projects:state.projects.filter(p=>p.id!==projectId)};openView(restoreView(sessions.current,remaining,{projectId:'',taskId:''})); }
@@ -325,8 +329,10 @@ function SettingsDialog({ state, close, fail }: { state: Snapshot; close: () => 
       <fieldset disabled={locked || working}><label>默认模型<select value={draft.model} onChange={e => field('model', e.target.value)}><option value="">选择一个模型</option>{draft.model && !models.some(m => m.key === draft.model) && <option value={draft.model}>{draft.model}</option>}{models.map(m => <option key={m.key} value={m.key} disabled={m.toolUse === false}>{m.name}</option>)}</select></label></fieldset>
       <div className="models-list">{models.map(m => <div key={m.key} className="model-row"><span className="model-icon"><HardDrive size={17}/></span><div><strong>{m.name}</strong><small>{(m.size / 1024 ** 3).toFixed(1)} GB · {m.toolUse === false ? '不支持工具调用' : m.toolUse ? '支持工具调用' : '工具能力待检测'} · {m.instances.length ? '已加载' : '未加载'}</small></div><div className="model-actions">{m.instances.length ? m.instances.map(i => <button key={i.id} disabled={locked || working || !connected} title={i.id} onClick={() => perform(async () => { await api.unloadModel(i.id); setModels(await api.models()); })}>卸载</button>) : <button disabled={locked || working || !connected || m.toolUse === false} onClick={() => perform(async () => { await api.saveSettings(draft); await api.loadModel(m.key); setModels(await api.models()); })}>加载</button>}</div></div>)}{!models.length && <p className="models-empty">在 {modelServiceName(draft)} 中下载支持工具调用的本地模型并启动服务，<br/>然后点击“保存并检测连接”。</p>}</div>
       <div className="settings-section-heading"><span>运行参数</span><small>模型任务开始后固定</small></div><fieldset className="parameter-grid" disabled={locked || working}>
+        {draft.provider !== 'ollama' && <label>思考模式<select aria-label="思考模式" value={draft.lmStudioReasoning || 'auto'} onChange={e => field('lmStudioReasoning', e.target.value)}><option value="auto">跟随模型默认</option><option value="off">关闭思考</option></select></label>}
         {([{ key: 'contextLength', label: '上下文长度', min: 4096, max: 262144, step: 1024 }, { key: 'maxTokens', label: '最大输出 Token', min: 128, max: 16384, step: 128 }, { key: 'temperature', label: '温度', min: 0, max: 2, step: 0.1 }, { key: 'maxSteps', label: '最大执行步数', min: 1, max: 100, step: 1 }, { key: 'commandTimeout', label: '命令超时（秒）', min: 1, max: 600, step: 1 }] as const).map(p => <label key={p.key}>{p.label}<input type="number" min={p.min} max={p.max} step={p.step} value={draft[p.key]} onChange={e => field(p.key, Number(e.target.value))}/></label>)}
-      </fieldset><p className="settings-hint">上下文设置用于加载新实例；已加载模型沿用其实际容量。变更后可卸载再加载。</p>
+      </fieldset><p className="settings-hint">上下文设置用于加载新实例；已加载模型沿用其实际容量。变更后可卸载再加载。执行任务还需容纳工具定义、历史和输出预留，建议从 16384 开始。</p>
+      {draft.provider !== 'ollama' && <p className="settings-hint">关闭思考适用于支持该选项的模型，从下一次任务或实测请求生效，无需重新加载。若模型只返回思考而无正文，可先关闭思考再实测。</p>}
       <ModelEvaluation reports={state.evaluations || []} api={api} disabled={tasksBusy || working} model={draft.model} start={async () => { await api.saveSettings(draft); await api.startEvaluation(); }} fail={fail}/>
     </div><footer><span>{feedback || '配置和任务记录保存在这台 Mac 上'}</span><button className="primary" disabled={locked || working} onClick={() => perform(async () => { await api.saveSettings(draft); close(); })}>{working ? <LoaderCircle size={15} className="spin"/> : <Check size={15}/>}保存设置</button></footer>
   </section></div>;

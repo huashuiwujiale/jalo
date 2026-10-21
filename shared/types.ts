@@ -1,17 +1,22 @@
 export type Status = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 export const busyStatuses: Status[] = ['queued', 'running', 'waiting'];
+export type ThinkingMode = 'auto' | 'on' | 'off';
 export interface Settings {
+  thinking?: ThinkingMode;
   provider?: 'lmstudio' | 'ollama';
+  lmStudioReasoning?: 'auto' | 'off';
   baseUrl: string; token: string; model: string; temperature: number;
   contextLength: number; maxTokens: number; maxSteps: number; commandTimeout: number;
 }
 export const defaults: Settings = {
   provider: 'lmstudio',
+  lmStudioReasoning: 'auto',
   baseUrl: 'http://127.0.0.1:1234', token: '', model: '', temperature: 0.2,
   contextLength: 16384, maxTokens: 2048, maxSteps: 30, commandTimeout: 60,
 };
 export interface LocalModel {
   key: string; name: string; size: number; maxContext: number;
+  thinking?: { default?: boolean };
   toolUse?: boolean; instances: { id: string; contextLength: number }[];
 }
 export interface Project { id: string; name: string; path: string; removedAt?: number }
@@ -34,8 +39,8 @@ export interface GitFile { path: string; originalPath?: string; index: string; w
 export interface GitStatus { available: boolean; files: GitFile[]; truncated: boolean }
 export interface GitPatch { path: string; version: string; patch: string; truncated: boolean; deleted: boolean }
 export interface GitReview { path: string; version: string }
-export interface Run { stopReason?: import('./continuation').StopReason; handoff?: import('./continuation').ContinuationCheckpoint; continuation?: import('./continuation').ContinuationLink; gitReview?: GitReview & { patch: string }; commands?: CommandSession[]; id: string; taskId: string; mode: Mode; model?: string; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planText?: string; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
-export interface SubmitInput { continuation?: { runId: string; version: string }; gitReview?: GitReview; projectId: string; prompt: string; taskId?: string; model?: string; mode?: Mode; references?: FileReference[]; planRunId?: string; reviewRunId?: string }
+export interface Run { thinking?: ThinkingMode; stopReason?: import('./continuation').StopReason; handoff?: import('./continuation').ContinuationCheckpoint; continuation?: import('./continuation').ContinuationLink; gitReview?: GitReview & { patch: string }; commands?: CommandSession[]; id: string; taskId: string; mode: Mode; model?: string; input: string; createdAt: number; endedAt?: number; status: Status; references: CapturedReference[]; changes: RunChange[]; checks: CheckResult[]; planText?: string; planRunId?: string; reviewRunId?: string; error?: string; progress?: Progress; contextUsage?: import('./context').ContextUsage }
+export interface SubmitInput { thinking?: ThinkingMode; continuation?: { runId: string; version: string }; gitReview?: GitReview; projectId: string; prompt: string; taskId?: string; model?: string; mode?: Mode; references?: FileReference[]; planRunId?: string; reviewRunId?: string }
 export interface RollbackPreview { token: string; patch: string; path: string; createsRecoveryCopy: boolean }
 export interface Change { path: string; before: string | null; after: string; patch: string }
 export interface Approval { tty?: boolean; background?: boolean; id: string; command: string; cwd: string; timeout: number }
@@ -46,7 +51,7 @@ export type EventCursor =
   | { before?: never; after: string; around?: never }
   | { before?: never; after?: never; around: string };
 export interface RunEvidence { successfulTools: string[]; changedFiles: string[] }
-export interface Followup { gitReview?: GitReview; id: string; prompt: string; kind: 'queue' | 'steer'; createdAt: number; model: string; mode: Mode; reviewRunId?: string }
+export interface Followup { thinking?: ThinkingMode; gitReview?: GitReview; id: string; prompt: string; kind: 'queue' | 'steer'; createdAt: number; model: string; mode: Mode; reviewRunId?: string }
 export interface Task {
   contextStart?: number;
   followups?: Followup[];
@@ -115,7 +120,7 @@ export interface Api {
   gitStatus(projectId: string): Promise<GitStatus>;
   gitPatch(input: { projectId: string; path: string }): Promise<GitPatch>;
   continuationPreview(taskId: string): Promise<import('./continuation').ContinuationPreview>;
-  resumeTask(input: { taskId: string; runId: string; version: string; goal: string; model?: string }): Promise<string>;
+  resumeTask(input: { taskId: string; runId: string; version: string; goal: string; model?: string; thinking?: ThinkingMode }): Promise<string>;
   commandInput(input: { taskId: string; runId: string; commandId: string; text: string }): Promise<void>;
   commandStop(input: { taskId: string; runId: string; commandId: string }): Promise<void>;
   commandResize(input: { taskId: string; runId: string; commandId: string; cols: number; rows: number }): Promise<void>;

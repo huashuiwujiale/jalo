@@ -25,3 +25,7 @@
 .composer-model-menu > footer span { font-size:9px; color:#9aa69f; }
 .run-model { overflow-wrap:anywhere; }
 @media(max-width:1200px) { .composer-actions .shortcut { display:none; } .composer-model { max-width:150px; } }
+
+.composer-thinking { flex-shrink:0; border:1px solid #dce5df; border-radius:12px; padding:6px 9px; color:#758079; font-size:11px; }
+.composer-thinking[aria-pressed=true] { background:#e3e9ff; border-color:#cbd5fc; color:#4859a8; }
+.composer-thinking:focus-visible { outline:2px solid #718a7a; outline-offset:2px; }

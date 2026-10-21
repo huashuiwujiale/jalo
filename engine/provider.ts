@@ -42,6 +42,7 @@ export class LMStudioProvider extends HttpModelProvider implements ModelProvider
     return data.models.filter((m: any) => m.type === 'llm').map((m: any) => ({
       key: m.key, name: m.display_name || m.key, size: m.size_bytes || 0,
       maxContext: m.max_context_length || 4096, toolUse: m.capabilities?.trained_for_tool_use,
+      ...(m.capabilities?.reasoning?.allowed_options?.includes('on') && m.capabilities.reasoning.allowed_options.includes('off') ? { thinking: { default: m.capabilities.reasoning.default === 'on' } } : {}),
       instances: (m.loaded_instances || []).map((i: any) => ({ id: i.id, contextLength: i.config?.context_length || 4096 })),
     }));
   }
@@ -52,9 +53,11 @@ export class LMStudioProvider extends HttpModelProvider implements ModelProvider
   }
   async unload(instance: string, signal?: AbortSignal) { await this.request('/api/v1/models/unload', { instance_id: instance }, signal); }
   async generate(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, delta: (text: string) => void, forceTool?: string, activity?: () => void): Promise<Completion> {
+    const thinking = this.settings.thinking && this.settings.thinking !== 'auto' ? this.settings.thinking : this.settings.lmStudioReasoning;
     const response = await this.request('/v1/chat/completions', {
       model: this.settings.model, messages: modelMessages(messages), tools, stream: true,
       temperature: this.settings.temperature, max_tokens: this.settings.maxTokens,
+      ...(thinking === 'off' ? { reasoning_effort: 'none' } : thinking === 'on' ? { reasoning_effort: 'low' } : {}),
       // LM Studio accepts string tool_choice values; the probe exposes only its one allowed tool.
       tool_choice: forceTool ? 'required' : 'auto',
       parallel_tool_calls: false,

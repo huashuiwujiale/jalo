@@ -2,11 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LMStudioProvider } from '../engine/provider';
 import { defaults } from '../shared/types';
+import { settingsSchema } from '../shared/validation';
 const frame = (delta: unknown, finish_reason: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta, finish_reason }] })}\n\n`;
 function fakeStream(text: string, split = 7) {
   const bytes = new TextEncoder().encode(text);
   return new Response(new ReadableStream({ start(controller) { for (let i = 0; i < bytes.length; i += split) controller.enqueue(bytes.slice(i, i + split)); controller.close(); } }));
 }
+test('LM Studio chat choices override the global default for both probing and generation', async () => {
+  const { lmStudioReasoning: _, ...legacy } = defaults;
+  assert.equal(settingsSchema.parse(legacy).lmStudioReasoning, 'auto');
+  assert.equal(settingsSchema.safeParse({ ...defaults, lmStudioReasoning: 'invalid' }).success, false);
+  for (const mode of [undefined, 'auto', 'off', 'on'] as const) {
+    const sent: any[] = [];
+    const p = new LMStudioProvider({ ...defaults, lmStudioReasoning: 'off', thinking: mode }, (async (_url, options) => {
+      sent.push(JSON.parse(String(options?.body))); return fakeStream(frame({ content: 'OK' }, 'stop'));
+    }) as typeof fetch);
+    for (const force of [undefined, 'capability_check']) await p.generate([], [], new AbortController().signal, () => {}, force);
+    assert.ok(sent.every(body => body.reasoning_effort === (mode === 'on' ? 'low' : 'none')));
+  }
+});
 test('stream parser preserves fragmented UTF-8 text and tool arguments', async () => {
   let sent: any;
   const stream = frame({ content: '你好' }) + frame({ tool_calls: [{ index: 0, id: 'call-a', function: { name: 'read_file', arguments: '{"pa' } }] }) + frame({ tool_calls: [{ index: 0, function: { arguments: 'th":"a.ts"}' } }] }) + frame({}, 'tool_calls') + 'data: [DONE]\n\n';
@@ -70,4 +84,20 @@ test('connection, auth and loading errors are actionable', async () => {
   await assert.rejects(auth.list(), error => { assert.match((error as Error).message, /访问令牌/); assert.doesNotMatch((error as Error).message, /secret-token/); return true; });
   const load = new LMStudioProvider(defaults, (async () => new Response('out of memory', { status: 500 })) as typeof fetch);
   await assert.rejects(load.load('m', 4096), /out of memory/);
+});
+
+test('only explicitly switchable reasoning models expose a composer toggle capability', async () => {
+  const values=[undefined,{allowed_options:['on'],default:'on'},{allowed_options:['off','on'],default:'off'},{allowed_options:['low','medium','high'],default:'medium'}];
+  const p=new LMStudioProvider(defaults,(async()=>Response.json({models:values.map((reasoning,i)=>({key:String(i),type:'llm',capabilities:{reasoning}}))})) as typeof fetch);
+  const models=await p.list();
+  assert.deepEqual(models.map(m=>m.thinking),[undefined,undefined,{default:false},undefined]);
+});
+
+test('automatic thinking does not add a request override unless the global default disables it', async () => {
+  for(const thinking of [undefined,'auto'] as const){
+    let body:any;
+    const p=new LMStudioProvider({...defaults,thinking},(async(_url,options)=>{body=JSON.parse(String(options?.body));return fakeStream(frame({content:'OK'},'stop'));}) as typeof fetch);
+    await p.generate([],[],new AbortController().signal,()=>{});
+    assert.equal(Object.hasOwn(body,'reasoning_effort'),false);
+  }
 });

@@ -96,6 +96,25 @@ export function compactContext(messages: Message[], tools: ToolDefinition[], con
       else old.push(unit);
     }
     flush();
+    // If the newest read alone overflows the budget, keep a bounded, explicitly
+    // partial tool result as well as its historical fact. Otherwise the model
+    // loses every source line and can repeatedly read the same oversized file.
+    const latest = units.at(-1);
+    if (keep === 0 && latest?.[0].tool_calls?.length) {
+      const reads = new Set(['read_file', 'search_files', 'list_directory']);
+      const calls = latest[0].tool_calls;
+      if (calls.every(call => reads.has(call.function.name)) && latest.slice(1).every(m => m.role === 'tool' && !m.content?.includes('项目指令 ') && !m.content?.startsWith('工具未成功：'))) {
+        for (const limit of [4000, 2000, 1000, 500]) {
+          const tail = latest.map(m => {
+            if (m.role !== 'tool' || !m.content || m.content.length <= limit) return m;
+            const prefix = m.content.slice(0, limit), boundary = prefix.lastIndexOf('\n');
+            return { ...m, content: `${boundary > 0 ? prefix.slice(0, boundary) : prefix}\n[Jalo 上下文裁剪：后续内容未展示。仅使用已显示的完整行；需要更多内容时按明确行范围继续读取，不要重复整文件读取。]` };
+          });
+          const withTail = [...candidate, ...tail];
+          if (messageTokens(withTail) <= budget) return { messages:withTail, compacted:true, usage:{...contextUsage(withTail,tools,contextLength,maxTokens),beforeTokens:before.inputTokens,compactions:1} };
+        }
+      }
+    }
     if (messageTokens(candidate) <= budget) return { messages:candidate, compacted:true, usage:{...contextUsage(candidate,tools,contextLength,maxTokens),beforeTokens:before.inputTokens,compactions:1} };
   }
   throw new ContextBudgetError('上下文不足：完整用户要求、项目指令和关键执行记录无法安全保留。请提高上下文长度、降低最大输出，或新建更小的任务；未静默丢弃关键记录。');

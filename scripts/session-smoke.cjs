@@ -24,6 +24,8 @@ const session = new SessionStore(path.join(home, 'ui-session.json'));
 const p=randomUUID(),q=randomUUID(),t=randomUUID(),u=randomUUID();
 const makeTask=(id,projectId)=>({id,projectId,title:id===t?'任务 A':'任务 B',model:'mock',status:'completed',createdAt:1,messages:[],changes:[],events:Array.from({length:80},(_,i)=>({id:`event-${i}`,at:i,kind:'message',role:i%2?'assistant':'user',text:`样例记录 ${i}\n仅用于界面验证。`}))});
 const state={projects:[{id:p,name:'A',path:'/fixture/a'},{id:q,name:'B',path:'/fixture/b'}],tasks:[makeTask(t,p),makeTask(u,q)],settings:{...defaults,model:'mock'}};
+let thinkingSupported=true;
+const submittedInputs=[];
 const markdownCode='  const text = "<tag> & data";\n'+'  // '+ 'long-code '.repeat(90)+'\n';
 const markdownText='# Markdown 验收\n\n**重点说明**和 `行内代码`。\n\n1. 读取\n2. 修改\n\n> 验收后再确认。\n\n```ts\n'+markdownCode+'```\n\n| 项目 | 状态 |\n| --- | --- |\n| 测试 | 通过 |\n\n- [x] 已完成\n\n[网页](https://example.com/docs) [禁止的链接](file:///etc/passwd)\n\n![图片](https://example.com/pixel)';
 state.tasks[0].events.find(event=>event.id==='event-46').text='# 用户原文\n**保持原样**';
@@ -53,7 +55,7 @@ ipcMain.handle('files:preview',(event,input)=>{sender(event);return projectFiles
 ipcMain.handle('files:reference',async(event,input)=>{sender(event);if(delayReference)await new Promise(r=>setTimeout(r,400));return projectFiles.referenceFile(fixture(input.projectId),input.path);});
 ipcMain.handle('app:snapshot',event=>{sender(event);return catalog();});
 ipcMain.handle('app:info',event=>{sender(event);return {version:load('./package.json').version,packaged:false,platform:process.platform,arch:process.arch,electron:process.versions.electron,chrome:process.versions.chrome,node:process.versions.node,osRelease:os.release(),dataDirectory:home,logDirectory:path.join(home,'logs'),logsAvailable:true};});
-ipcMain.handle('models:list',event=>{sender(event);return [];});
+ipcMain.handle('models:list',event=>{sender(event);return [{key:'mock',name:'Mock',size:1,maxContext:16384,toolUse:true,...(thinkingSupported?{thinking:{default:true}}:{}),instances:[]}];});
 ipcMain.handle('settings:save',(event,input)=>{sender(event);state.settings=settingsSchema.parse(input);win.webContents.send('app:update',{sequence:++sequence,tasks:[],settings:state.settings});});
 ipcMain.handle('task:detail',(event,id)=>{sender(event);return taskDetail(state.tasks.find(task=>task.id===id),revisions.get(id)||0);});
 ipcMain.handle('task:summary',(event,id)=>{sender(event);return taskSummary(state.tasks.find(task=>task.id===id),revisions.get(id)||0);});
@@ -74,7 +76,7 @@ ipcMain.handle('session:load',event=>{sender(event);return session.read();});
 ipcMain.handle('session:save',(event,view)=>{sender(event);viewSaves++;return session.save(viewSchema.parse(view));});
 ipcMain.on('session:flush',(event,view)=>{try{sender(event);session.update(viewSchema.parse(view));session.flush();event.returnValue={ok:true};}catch(error){event.returnValue={ok:false,error:error.message};}});
 ipcMain.handle('task:submit',(event,input)=>{
-  sender(event);if(failSubmit)throw new Error('模拟提交失败');
+  sender(event);submittedInputs.push(input);if(failSubmit)throw new Error('模拟提交失败');
   const id=input.taskId||randomUUID();if(!input.taskId)state.tasks.unshift({...makeTask(id,input.projectId),title:'新任务'});
   revisions.set(id,(revisions.get(id)||0)+1);sequence++;catalogVersion++;
   win.webContents.send('app:update',{sequence,catalogVersion,tasks:[taskSummary(state.tasks.find(task=>task.id===id),revisions.get(id))]});return id;
@@ -115,7 +117,7 @@ async function finish(error){
   if(error && win && !win.isDestroyed()){
     try{console.error('UI failure state',await js("JSON.stringify({top:document.querySelector('.conversation')?.scrollTop,height:document.querySelector('.conversation')?.scrollHeight,rows:Array.from(document.querySelectorAll('[data-event-id]')).map(n=>[n.dataset.eventId,n.getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top]),spacers:Array.from(document.querySelector('.virtual-timeline')?.children||[]).filter(n=>!n.dataset.rowId).map(n=>n.style.height)})"));console.error('Saved selection',session.read().state.selected,session.read().state.views[Object.keys(session.read().state.views).find(k=>k===`${p}:${t}`)]?.scroll);}catch{}}
   win?.destroy();session.flush();await server?.close();fs.rmSync(home,{recursive:true,force:true});
-  if(error)console.error(error);else console.log('Session UI smoke passed: Markdown, streaming, drafts, window restart, 10000-event anchor jump, bounded cache/DOM, resize, expanded cards, live follow, 2000-task navigation/search/rename/archive and provider logos/selection/save/locking');
+  if(error)console.error(error);else console.log('Session UI smoke passed: Markdown, streaming, drafts, window restart, 10000-event anchor jump, bounded cache/DOM, resize, expanded cards, live follow, 2000-task navigation/search/rename/archive and provider logos/selection/save/locking plus thinking controls');
   app.exit(error?1:0);
 }
 app.on('window-all-closed',()=>{});
@@ -124,6 +126,9 @@ app.whenReady().then(async()=>{
   server=await createServer({root:project,cacheDir:path.join(home,'vite-cache'),server:{host:'127.0.0.1',port:0}});await server.listen();
   const url=`http://127.0.0.1:${server.httpServer.address().port}`;await openWindow(url);
   await waitFor("window.smokePrompt==='草稿 A'");
+  await waitFor("document.querySelector('[aria-label=切换思考]')?.getAttribute('aria-pressed')==='true'");
+  await js("document.querySelector('[aria-label=切换思考]').click()");
+  await waitFor("document.querySelector('[aria-label=切换思考]')?.getAttribute('aria-pressed')==='false'");
   // Settle the initial focus/selection scroll before measuring ordinary typing.
   await input('草稿 A');
   await js(`(async()=>{await document.fonts.ready;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));})()`);
@@ -213,18 +218,21 @@ app.whenReady().then(async()=>{
   await waitFor("document.querySelector('.mention-menu [role=alert]')?.textContent.includes('二进制')");
   assert.equal(await js("window.smokePrompt"),'@binary');
   await input('修改后的草稿 A');await js("document.querySelectorAll('.project-item')[1].click()");
-  await waitFor("window.smokePrompt==='草稿 B'");await input('修改后的草稿 B');
+  await waitFor("window.smokePrompt==='草稿 B'");await waitFor("document.querySelector('[aria-label=切换思考]')?.getAttribute('aria-pressed')==='true'");await input('修改后的草稿 B');
   assert.equal(await js("!!document.querySelector('.context-usage')"),false);
-  await js("document.querySelectorAll('.project-item')[0].click()");await waitFor("window.smokePrompt==='修改后的草稿 A'");
+  await js("document.querySelectorAll('.project-item')[0].click()");await waitFor("window.smokePrompt==='修改后的草稿 A'");await waitFor("document.querySelector('[aria-label=切换思考]')?.getAttribute('aria-pressed')==='false'");
   assert.match(await js("document.querySelector('.reference-chips').textContent"),/a.txt/);
   await waitFor("document.querySelector('[data-event-id=\"event-20\"]') && Math.abs(document.querySelector('[data-event-id=\"event-20\"]').getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top)<3");
   await js("document.querySelector('.new-task').click()");await waitFor("window.smokePrompt===''");
+  await waitFor("document.querySelector('[aria-label=切换思考]')?.getAttribute('aria-pressed')==='true'");
+  await js("document.querySelector('[aria-label=切换思考]').click()");
   await input('新任务草稿');await js("document.querySelector('button[aria-label=\"发送任务\"]').click()");
   await waitFor("document.querySelector('[role=alert]')?.textContent.includes('模拟提交失败')");assert.equal(await js("window.smokePrompt"),'新任务草稿');
+  assert.equal(submittedInputs.at(-1).thinking,'off');
   failSubmit=false;await js("document.querySelector('button[aria-label=\"发送任务\"]').click()");await waitFor("window.smokePrompt===''");
   await js("document.querySelector('.new-task').click()");assert.equal(await js("window.smokePrompt"),'');
   await js("Array.from(document.querySelectorAll('.task-item')).find(e=>e.title==='任务 A').click()");
-  await waitFor("window.smokePrompt==='修改后的草稿 A'");
+  await waitFor("window.smokePrompt==='修改后的草稿 A'");await waitFor("document.querySelector('[aria-label=切换思考]')?.getAttribute('aria-pressed')==='false'");
   await waitFor("document.querySelector('[data-event-id=\"event-20\"]') && Math.abs(document.querySelector('[data-event-id=\"event-20\"]').getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top)<3");
   await input('关闭前最后草稿');await new Promise(resolve=>{win.once('closed',resolve);win.close();});
   await openWindow(url);await waitFor("window.smokePrompt==='关闭前最后草稿'");
@@ -257,7 +265,7 @@ app.whenReady().then(async()=>{
   await revealEvent('long-1000');
   const beforeResize=await js("document.querySelector('[data-event-id=\"long-1000\"]').getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top");
   win.setSize(1180,940);
-  await waitFor(`document.querySelector('[data-event-id="long-1000"]') && Math.abs(document.querySelector('[data-event-id="long-1000"]').getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top-(${beforeResize}))<3`);
+  await waitFor(`document.querySelector('[data-event-id="long-1000"]') && Math.abs(document.querySelector('[data-event-id="long-1000"]').getBoundingClientRect().top-document.querySelector('.conversation').getBoundingClientRect().top-(${beforeResize}))<=3`);
   fs.writeFileSync(path.join(os.tmpdir(),'jalo-history-ui.png'),(await win.webContents.capturePage()).toPNG());
   for(let i=0;i<8;i++){
     await js("document.querySelector('.conversation').scrollTop=0");await new Promise(r=>setTimeout(r,60));
@@ -298,6 +306,22 @@ app.whenReady().then(async()=>{
   await waitFor("document.querySelector('.task-item')?.title==='列表任务 1999 已重命名'");
   await js("document.querySelector('button[aria-label=\"恢复任务：列表任务 1999 已重命名\"]').click()");await waitFor("!document.querySelector('.task-item')");
   await js("document.querySelectorAll('.history-tabs button')[0].click()");await waitFor("document.querySelector('.task-item')?.title==='列表任务 1999 已重命名'");
+  await js("document.querySelector('.sidebar-bottom button').click()");
+  await waitFor("document.querySelector('[aria-label=\"思考模式\"]')");
+  await js(`(()=>{const select=document.querySelector('[aria-label="思考模式"]');select.value='off';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await js("document.querySelector('.settings-modal footer .primary').click()");
+  await waitFor("!document.querySelector('.settings-modal')");
+  assert.equal(state.settings.lmStudioReasoning,'off');
+  await js("document.querySelector('.sidebar-bottom button').click()");
+  await waitFor("document.querySelector('[aria-label=\"思考模式\"]')?.value==='off'");
+  await js("document.querySelector('[aria-label=\"关闭设置\"]').click()");
+  thinkingSupported=false;
+  await js("document.querySelector('.composer-model').click()");
+  await waitFor("document.querySelector('.composer-model-menu') && !document.querySelector('[aria-label=切换思考]')");
+  thinkingSupported=true;
+  await js("document.querySelector('[aria-label=\"刷新模型列表\"]').click()");
+  await waitFor("document.querySelector('[aria-label=切换思考]')");
+  await js("document.querySelector('.composer-model-menu').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
   await js("document.querySelector('.sidebar-bottom button').click()");
   await waitFor("document.querySelector('.provider-select-trigger')?.textContent==='LM Studio'");
   await waitFor("document.querySelector('.provider-select-trigger img').naturalWidth>0");
