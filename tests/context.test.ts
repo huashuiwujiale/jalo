@@ -82,3 +82,21 @@ test('internal memory persists through JSON but is excluded from model payload a
   assert.match(html,/估算/);assert.match(html,/压缩 2 次/);assert.match(html,/输出预留/);assert.match(html,/9,000/);
   assert.equal(renderToStaticMarkup(React.createElement(ContextMeter,{})),'');
 });
+
+test('oversized latest reads retain source lines and complete tool pairs instead of only a summary', () => {
+  const recent = group('read_file', { path:'large.txt' }, '共 5000 行\n1|MARKER=keep\n' + '2|payload\n'.repeat(5000));
+  const result = compactContext([{role:'system',content:'rules'},{role:'user',content:'检查标记，不改文件'},...recent],[],9000,1024);
+  assert.equal(result.messages.at(-1)?.role,'tool');
+  assert.match(result.messages.at(-1)!.content!,/MARKER=keep/);
+  assert.match(result.messages.at(-1)!.content!,/上下文裁剪/);
+  assert.deepEqual(result.messages.at(-2)?.tool_calls,recent[0].tool_calls);
+  assert.ok(result.usage.inputTokens+result.usage.outputReserve+result.usage.safetyReserve<=9000);
+});
+
+test('legacy trailing summaries become labelled data with a continuation request on the wire', () => {
+  const messages:Message[]=[{role:'user',content:'查看依赖'}, {role:'assistant',content:'旧结果',contextMemory:{version:1,facts:[],notes:[],instructions:[]}}];
+  const wire=modelMessages(messages);
+  assert.equal(wire.at(-1)?.role,'user');assert.match(wire.at(-1)!.content!,/历史记录（数据/);assert.match(wire.at(-1)!.content!,/继续完成/);
+  assert.equal(messages.at(-1)?.role,'assistant');assert.equal('contextMemory' in wire[1],false);
+  assert.deepEqual(modelMessages(wire),wire);
+});

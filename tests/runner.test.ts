@@ -107,11 +107,12 @@ test('two empty responses fail with a clear reason and never execute queued tool
     await assert.rejects(fs.access(path.join(x.root, 'unexpected')));
   } finally { await x.cleanup(); }
 });
-test('empty retry allowance is per task run, not replenished after every successful step', async () => {
+test('isolated empty responses recover after successful steps without replaying tools', async () => {
   const x = await run([probe(), empty(), call('list_directory', {}), empty(), stop()]);
   try {
-    assert.equal((x.events.at(-1) as any).status, 'failed');
-    assert.equal(x.events.filter(e => e.type === 'event' && e.event.kind === 'notice' && e.event.text.includes('重试一次')).length, 1);
+    assert.equal((x.events.at(-1) as any).status, 'completed');
+    assert.equal(x.events.filter(e => e.type === 'event' && e.event.kind === 'notice' && e.event.text.includes('重试一次')).length, 2);
+    assert.equal(x.events.filter(e => e.type === 'event' && e.event.toolPhase === 'call').length, 1);
   } finally { await x.cleanup(); }
 });
 test('compaction is persisted before requesting the model, including when generation fails', async () => {
@@ -251,4 +252,32 @@ test('step and output limits expose explicit continuation reasons without repeat
   const y = await run([probe(), { ...call('write_file', { path: 'a.txt', content: 'never' }), finishReason: 'length' }]);
   try { assert.equal((y.events.at(-1) as any).stopReason, 'output'); await assert.rejects(fs.access(path.join(y.root, 'a.txt'))); }
   finally { await y.cleanup(); }
+});
+
+test('empty recovery remains bounded across steps and does not duplicate recovery instructions', async () => {
+  const x = await run([probe(),empty(),call('list_directory',{}),empty(),call('list_directory',{}),empty(),call('list_directory',{}),empty(),stop()]);
+  try {
+    assert.equal((x.events.at(-1) as any).status,'failed');
+    assert.match((x.events.at(-1) as any).error,/3 次空回复恢复上限/);
+    assert.equal(x.events.filter(e=>e.type==='event' && e.event.toolPhase==='call').length,3);
+    const history=x.events.filter(e=>e.type==='messages').at(-1);
+    assert.equal(history?.type==='messages' && history.messages[0].content?.split('恢复提示：').length,2);
+  } finally { await x.cleanup(); }
+});
+
+
+test('read-only replies containing status values are not mistaken for claims of writes', async () => {
+  for (const content of ['MARKER=updated', '当前状态是 `已修改`。', '状态值为 created。']) {
+    const x=await run([probe(),call('list_directory',{}),textReply(content)]);
+    try { assert.equal((x.events.at(-1) as any).status,'completed');assert.deepEqual((x.events.at(-1) as any).evidence.changedFiles,[]); }
+    finally { await x.cleanup(); }
+  }
+});
+
+test('explicit English write claims still require real file differences', async () => {
+  for (const content of ['I updated a.txt.', 'I updated `a.txt`.', 'The file was modified.', 'Successfully deleted the button.']) {
+    const x=await run([probe(),textReply(content),textReply(content)]);
+    try { assert.equal((x.events.at(-1) as any).status,'failed');assert.match((x.events.at(-1) as any).error,/没有产生实际文件差异/); }
+    finally { await x.cleanup(); }
+  }
 });

@@ -31,12 +31,14 @@ test('model selections survive reopening without discarding old version-1 drafts
     await fs.writeFile(file,JSON.stringify(old));
     const store=new SessionStore(file); assert.equal(store.read().warning,undefined);
     assert.equal(store.read().state.views[viewKey(p,t)].prompt,'旧版未发送内容');
-    await store.save({...emptyView(p,t),model:'a',prompt:'草稿 A'});
-    await store.save({...emptyView(p,u),model:'b'});
+    await store.save({...emptyView(p,t),model:'a',thinking:'off',prompt:'草稿 A'});
+    await store.save({...emptyView(p,u),model:'b',thinking:'on'});
     await store.save({...emptyView(p),model:''});
     const reopened=new SessionStore(file).read(); assert.equal(reopened.warning,undefined);
     assert.equal(reopened.state.version,1);
     assert.equal(reopened.state.views[viewKey(p,t)].model,'a');
+    assert.equal(reopened.state.views[viewKey(p,t)].thinking,'off');
+    assert.equal(reopened.state.views[viewKey(p,u)].thinking,'on');
     assert.equal(reopened.state.views[viewKey(p,u)].model,'b');
     assert.equal(reopened.state.views[viewKey(p,'')].model,'');
   } finally { await fs.rm(home,{recursive:true,force:true}); }

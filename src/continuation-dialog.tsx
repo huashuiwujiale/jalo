@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import type { Api } from '../shared/types';
+import type { Api, ThinkingMode } from '../shared/types';
 import type { ContinuationPreview } from '../shared/continuation';
 import { stopLabels } from '../shared/continuation';
 
-export function ContinuationDialog({ api, taskId, extraGoal, model, close, resumed }: { api: Api; taskId: string; extraGoal: string; model: string; close: () => void; resumed: () => void }) {
+export function ContinuationDialog({ api, taskId, extraGoal, model, thinking, close, resumed }: { api: Api; taskId: string; extraGoal: string; model: string; thinking?: ThinkingMode; close: () => void; resumed: () => void }) {
   const [preview, setPreview] = useState<ContinuationPreview>(), [goal, setGoal] = useState<string>(), [error, setError] = useState(''), [loading, setLoading] = useState(false), [sending, setSending] = useState(false), [attempt, retry] = useState(0);
   useEffect(() => {
     let active = true; setLoading(true); setError(''); setPreview(undefined);
@@ -13,7 +13,7 @@ export function ContinuationDialog({ api, taskId, extraGoal, model, close, resum
   const start = async () => {
     if (!preview || !goal?.trim()) return;
     setSending(true); setError('');
-    try { await api.resumeTask({ taskId, runId: preview.runId, version: preview.version, goal, model }); resumed(); }
+    try { await api.resumeTask({ taskId, runId: preview.runId, version: preview.version, goal, model, thinking }); resumed(); }
     catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setSending(false); }
   };

@@ -9,12 +9,13 @@ export interface EvaluationReport {
   id: string; suiteVersion: 1; appVersion: string; model: string; instance?: string;
   createdAt: number; endedAt?: number;
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
-  parameters: Pick<Settings, 'contextLength' | 'maxTokens' | 'temperature' | 'maxSteps'>;
+  parameters: Pick<Settings, 'contextLength' | 'maxTokens' | 'temperature' | 'maxSteps' | 'lmStudioReasoning'>;
   caseTimeoutMs: number; cases: EvaluationCase[]; error?: string;
 }
 export function newEvaluation(id: string, settings: Settings, appVersion: string): EvaluationReport {
   return { id, suiteVersion: 1, appVersion, model: settings.model, createdAt: Date.now(), status: 'running',
-    parameters: { contextLength: settings.contextLength, maxTokens: settings.maxTokens, temperature: settings.temperature, maxSteps: Math.min(settings.maxSteps, 8) },
+    parameters: { contextLength: settings.contextLength, maxTokens: settings.maxTokens, temperature: settings.temperature, maxSteps: Math.min(settings.maxSteps, 8),
+      ...(settings.provider !== 'ollama' ? { lmStudioReasoning: settings.lmStudioReasoning || 'auto' } : {}) },
     caseTimeoutMs: 180000, cases: [
       { id: 'read', title: '读取真实文件', status: 'pending', checks: [] },
       { id: 'text', title: '修改文本，保留其他文件', status: 'pending', checks: [] },

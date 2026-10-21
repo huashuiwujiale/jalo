@@ -62,6 +62,7 @@ port.on('message', async ({ data }: any) => {
     const model = models.find(m => m.key === input.model || m.instances.some(i => i.id === input.model));
     if (!model) throw new Error('选择的模型不存在，请刷新模型列表');
     if (model.toolUse === false) throw new Error('模型服务标记此模型不支持工具调用，请选择其他模型');
+    if (settings.thinking && settings.thinking !== 'auto' && !model.thinking) throw new Error('当前模型未报告支持切换思考，请刷新模型列表或使用默认思考模式');
     settings.contextLength = Math.min(settings.contextLength, model.maxContext);
     const instance = model.instances.find(i => i.id === input.model) || model.instances[0];
     if (instance) {

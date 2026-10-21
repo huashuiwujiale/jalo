@@ -30,7 +30,8 @@ test('search follows nested gitignore rules, invalidates edited rules and suppor
 import { ToolRegistry } from '../engine/tools';
 
 async function fixture() {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'jalo-search-')), root = path.join(home, 'project');
+  // Match ToolRegistry.init() canonicalization, including macOS /var -> /private/var.
+  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'jalo-search-'))), root = path.join(home, 'project');
   await fs.mkdir(root);
   const controller = new AbortController();
   const tools = new ToolRegistry({ root, backupDir: path.join(home, 'backups'), signal: controller.signal, timeout: 1, mode: 'review', emit: () => {}, approve: async () => false });
@@ -43,6 +44,9 @@ test('filename queries share one scan, reuse names without reading contents, and
   try {
     await fs.mkdir(path.join(x.root, 'src'));
     await Promise.all(Array.from({ length: 400 }, (_, i) => fs.writeFile(path.join(x.root, 'src', `File${i}.ts`), 'body')));
+    // This case measures cache reuse without filesystem changes. macOS may deliver
+    // delayed fixture-creation notifications; watcher invalidation is tested separately.
+    t.mock.method(fsSync, 'watch', () => Object.assign(new EventEmitter(), { close() {} }));
     const open = fs.opendir, lstat = fs.lstat; let opens = 0, stats = 0;
     t.mock.method(fs, 'opendir', async (full: string) => { opens++; return open(full); });
     t.mock.method(fs, 'lstat', async (full: string) => { stats++; return lstat(full); });

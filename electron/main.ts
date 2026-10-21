@@ -20,7 +20,7 @@ import { viewSchema } from '../shared/session';
 import { EvaluationController } from './evaluation';
 import { DiagnosticLog, diagnosticReport, errorCategory, saveDiagnosticReport } from './diagnostics';
 import { createProvider } from '../engine/providers';
-import { settingsSchema, submitSchema } from '../shared/validation';
+import { settingsSchema, submitSchema, thinkingSchema } from '../shared/validation';
 import { linkedPlanContext, pageTaskEvents } from '../shared/task-history';
 import { changeView, searchTaskIds, taskDetail, taskSummary } from '../shared/task-wire';
 import { ReplyStream, UpdateBatch } from './ipc-updates';
@@ -175,7 +175,7 @@ async function runFollowup(taskId: string, id: string) {
   const task = readTask(taskId), next = task.followups?.find(f => f.id === id);
   if (!next) throw new Error('追加要求不存在或已生效');
   if (busyStatuses.includes(task.status)) throw new Error('请等待当前任务结束');
-  return submitTask({ taskId, projectId: task.projectId, prompt: next.prompt, mode: next.mode, model: next.model, ...(next.reviewRunId ? { reviewRunId: next.reviewRunId } : {}), ...(next.gitReview ? { gitReview: next.gitReview } : {}) }, id);
+  return submitTask({ taskId, projectId: task.projectId, prompt: next.prompt, mode: next.mode, model: next.model, thinking: next.thinking, ...(next.reviewRunId ? { reviewRunId: next.reviewRunId } : {}), ...(next.gitReview ? { gitReview: next.gitReview } : {}) }, id);
 }
 function pump() {
   if (active || modelOperation || evaluation?.busy || quitting || storageFailed) return;
@@ -496,7 +496,7 @@ function registerApi() {
     projectLocks.add(input.projectId);
     try {
     if (modelOperation) throw new Error('模型正在加载或卸载，请稍后创建任务');
-    const config = { ...settings(), ...(input.model !== undefined ? { model: input.model } : {}) };
+    const config = { ...settings(), ...(input.thinking !== undefined ? { thinking: input.thinking } : {}), ...(input.model !== undefined ? { model: input.model } : {}) };
     if (!config.model) throw new Error('请先在聊天框或模型设置中选择模型');
     const project = store.projects().find(p => p.id === input.projectId); if (!project) throw new Error('请先选择项目');
     await fs.access(project.path);
@@ -529,7 +529,7 @@ function registerApi() {
     }
     if (!continuation && ['interrupted', 'cancelled', 'failed'].includes(task.status)) task.messages.push({ role: 'assistant', content: '上一轮未正常完成，可能已有部分文件修改或命令执行。请先检查当前状态，不要自动重放历史工具调用。' });
     if (continuation) task.contextStart = task.messages.length;
-    const run: Run = { ...(continuation ? { continuation: { runId: continuation.runId, version: continuation.version, files: continuation.files } } : {}), id: randomUUID(), taskId: task.id, mode: input.mode, model: config.model, input: input.prompt, createdAt: Date.now(), status: 'queued', references, changes: [], checks: [], planRunId: input.planRunId, reviewRunId: input.reviewRunId, ...(gitTarget ? { gitReview: { path: gitTarget.path, version: gitTarget.version, patch: gitTarget.patch } } : {}) };
+    const run: Run = { ...(continuation ? { continuation: { runId: continuation.runId, version: continuation.version, files: continuation.files } } : {}), id: randomUUID(), taskId: task.id, mode: input.mode, model: config.model, thinking: config.thinking || config.lmStudioReasoning || 'auto', input: input.prompt, createdAt: Date.now(), status: 'queued', references, changes: [], checks: [], planRunId: input.planRunId, reviewRunId: input.reviewRunId, ...(gitTarget ? { gitReview: { path: gitTarget.path, version: gitTarget.version, patch: gitTarget.patch } } : {}) };
     task.runs ??= []; task.runs.push(run); task.currentRunId = run.id; task.mode = input.mode;
     progress(task, 'queued');
     let context = referenceContext(references);
@@ -553,11 +553,11 @@ function registerApi() {
     finally { projectLocks.delete(task.projectId); releaseTasks(); }
   });
   register('task:resume', async (raw: unknown) => {
-    const input = z.object({ taskId: uuid, runId: uuid, version: z.string().regex(/^[a-f0-9]{64}$/), goal: z.string().trim().min(1).max(16000), model: z.string().min(1).max(300).optional() }).strict().parse(raw);
+    const input = z.object({ taskId: uuid, runId: uuid, version: z.string().regex(/^[a-f0-9]{64}$/), goal: z.string().trim().min(1).max(16000), thinking: thinkingSchema.optional(), model: z.string().min(1).max(300).optional() }).strict().parse(raw);
     try {
     const task = readTask(input.taskId), run = currentRun(task);
     if (!run || run.id !== input.runId) throw new Error('续接目标已变化，请重新查看摘要');
-    return await submitTask({ taskId: task.id, projectId: task.projectId, prompt: input.goal, model: input.model, mode: run.mode,
+    return await submitTask({ taskId: task.id, projectId: task.projectId, prompt: input.goal, model: input.model, thinking: input.thinking, mode: run.mode,
       ...(run.reviewRunId ? { reviewRunId: run.reviewRunId } : {}), ...(run.gitReview ? { gitReview: { path: run.gitReview.path, version: run.gitReview.version } } : {}), continuation: { runId: run.id, version: input.version } });
     } finally { releaseTasks(); }
   });
@@ -568,7 +568,7 @@ function registerApi() {
     if (!busyStatuses.includes(task.status) || run?.progress?.phase === 'stopping') throw new Error('当前任务已结束或正在停止，请直接发送新要求');
     if ((task.followups?.length || 0) >= 20) throw new Error('追加要求最多保留 20 条');
     if (input.kind === 'steer' && active?.task.id !== task.id) throw new Error('任务尚未开始，请使用排队发送');
-    const value = { id: randomUUID(), prompt: input.prompt, kind: input.kind, createdAt: Date.now(), model: task.model, mode: run?.mode || 'execute' as const, reviewRunId: run?.reviewRunId, ...(run?.gitReview ? { gitReview: { path: run.gitReview.path, version: run.gitReview.version } } : {}) };
+    const value = { id: randomUUID(), prompt: input.prompt, kind: input.kind, createdAt: Date.now(), model: task.model, thinking: run?.thinking, mode: run?.mode || 'execute' as const, reviewRunId: run?.reviewRunId, ...(run?.gitReview ? { gitReview: { path: run.gitReview.path, version: run.gitReview.version } } : {}) };
     task.followups ??= []; task.followups.push(value); persist(task);
     if (input.kind === 'steer') active!.worker.postMessage({ type: 'steer', runId: run!.id, followup: value });
     return value.id;

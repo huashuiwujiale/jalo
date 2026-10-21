@@ -37,7 +37,7 @@ export class TaskRunner {
       return true;
     };
     const editFailures = new Map<string, number>();
-    let emptyRetries = 0;
+    let totalEmptyRetries = 0;
     let evidenceRetries = 0;
     let compactions = 0;
     const prepareContext = () => {
@@ -76,6 +76,7 @@ export class TaskRunner {
         prepareContext();
         this.notice(`执行步骤 ${step + 1} / ${this.settings.maxSteps}`);
         let completion: Completion;
+        let emptyRetries = 0;
         for (;;) {
           this.signal.throwIfAborted();
           this.progress('waiting_model', step + 1);
@@ -87,13 +88,13 @@ export class TaskRunner {
           if (!['stop', 'tool_calls'].includes(completion.finishReason)) throw new Error(`模型未正常完成本轮响应：${completion.finishReason}`);
           if (completion.message.tool_calls?.length || completion.message.content?.trim()) break;
           const reason = completion.reasoningCharacters ? '只返回了思考内容，没有最终回复或结构化工具调用' : '没有返回正文或结构化工具调用';
-          if (completion.finishReason !== 'stop' || emptyRetries >= 1) {
-            throw new Error(`模型 ${this.settings.model || '当前模型'} ${reason}（结束原因：${completion.finishReason}）。${emptyRetries ? '一次空回复重试后仍无法继续。' : ''}本次空回复未执行工具；此前已完成的修改仍保留。请新建任务缩短历史，或切换模型后继续。`);
+          if (completion.finishReason !== 'stop' || emptyRetries >= 1 || totalEmptyRetries >= 3) {
+            throw new Error(`模型 ${this.settings.model || '当前模型'} ${reason}（结束原因：${completion.finishReason}）。${emptyRetries ? '一次空回复重试后仍无法继续。' : totalEmptyRetries >= 3 ? '本轮已达到 3 次空回复恢复上限。' : ''}本次空回复未执行工具；此前已完成的修改仍保留。请新建任务缩短历史，或切换模型后继续。`);
           }
-          emptyRetries++;
+          emptyRetries++; totalEmptyRetries++;
           this.notice(`模型${reason}，正在重试一次；不会重放已执行的工具。`);
           // Keep tool results and the latest request; do not restart the task or replay tools.
-          messages = messages.map(m => m.role === 'system' ? { ...m, content: `${m.content}\n恢复提示：上一次生成没有有效回复。请响应最后一条用户要求；需要操作时返回结构化工具调用，否则给出明确文字说明，不要返回空白。已执行操作以工具结果为准。` } : m);
+          messages = messages.map(m => m.role === 'system' && !m.content?.includes('恢复提示：上一次生成没有有效回复。') ? { ...m, content: `${m.content}\n恢复提示：上一次生成没有有效回复。请响应最后一条用户要求；需要操作时返回结构化工具调用，否则给出明确文字说明，不要返回空白。已执行操作以工具结果为准。` } : m);
           prepareContext();
         }
         const assistant = modelMessages([completion.message])[0];
