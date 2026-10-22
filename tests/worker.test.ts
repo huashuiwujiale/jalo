@@ -15,12 +15,12 @@ test('worker resolves the chosen model at send time, loads only when needed and 
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'jalo-model-worker-'));
   const Module = require('node:module'), originalLoad = Module._load, originalPort = (process as any).parentPort;
   try {
-    for (const scenario of ['loaded', 'unloaded', 'removed', 'incompatible'] as const) {
+    for (const scenario of ['loaded', 'unloaded', 'removed', 'incompatible', 'small-context', 'configured-context', 'model-context'] as const) {
       const port = new EventEmitter() as any, loads: string[] = [], generated: string[] = [];
       let unloads = 0, result: any;
       class Provider {
         constructor(private settings: Settings) {}
-        async list() { return scenario === 'removed' ? [] : [{ key:'chosen', toolUse:scenario !== 'incompatible', maxContext:16384, instances:scenario === 'loaded' ? [{id:'chosen-instance',contextLength:16384}] : [] }]; }
+        async list() { return scenario === 'removed' ? [] : [{ key:'chosen', toolUse:scenario !== 'incompatible', maxContext:scenario === 'model-context' ? 4096 : 16384, instances:scenario === 'unloaded' ? [] : [{id:'chosen-instance',contextLength:scenario === 'small-context' ? 4096 : 16384}] }]; }
         async load(key: string) { loads.push(key); return 'chosen-instance'; }
         async unload() { unloads++; }
         async generate(_messages: Message[], _tools: unknown, _signal: AbortSignal, _delta: unknown, forceTool?: string) {
@@ -37,13 +37,19 @@ test('worker resolves the chosen model at send time, loads only when needed and 
       delete require.cache[require.resolve('../engine/worker.ts')]; require('../engine/worker.ts');
       const timer=setTimeout(()=>resolveDone(),5000);
       try {
-        port.emit('message',{data:{type:'start',root:home,backupDir:path.join(home,'backups'),settings:{...defaults,model:'chosen'},input:{projectId:'p',model:'chosen',messages:[{role:'user',content:'继续上一轮对话'}],changes:[],run:{id:'r',mode:'plan',references:[]}}}});
+        port.emit('message',{data:{type:'start',root:home,backupDir:path.join(home,'backups'),settings:{...defaults,model:'chosen',contextLength:scenario === 'configured-context' ? 4096 : defaults.contextLength},input:{projectId:'p',model:'chosen',messages:[{role:'user',content:'继续上一轮对话'}],changes:[],run:{id:'r',mode:'plan',references:[]}}}});
         await done; assert.ok(result,`worker timed out: ${scenario}`);
         assert.equal(unloads,0);
         assert.deepEqual(loads,scenario === 'unloaded' ? ['chosen'] : []);
-        if(scenario === 'removed' || scenario === 'incompatible') {
+        if(scenario === 'removed' || scenario === 'incompatible' || scenario.endsWith('-context')) {
           assert.equal(result.status,'failed'); assert.deepEqual(generated,[]);
-          assert.match(result.error,scenario === 'removed' ? /不存在/ : /工具调用/);
+          if (scenario === 'small-context') {
+            for (const detail of ['实际可用 4096', '最大输出 2048', 'Jalo 设置 16384', '已加载实例 4096', 'LM Studio', '重新加载']) assert.ok(result.error.includes(detail), detail);
+          } else if (scenario === 'configured-context') {
+            assert.match(result.error, /Jalo 设置 4096/); assert.match(result.error, /提高上下文长度/); assert.doesNotMatch(result.error, /卸载/);
+          } else if (scenario === 'model-context') {
+            assert.match(result.error, /模型上限 4096/); assert.match(result.error, /选择支持更大上下文的模型/);
+          } else assert.match(result.error,scenario === 'removed' ? /不存在/ : /工具调用/);
         } else { assert.equal(result.status,'completed'); assert.deepEqual(generated,['chosen-instance','chosen-instance']); }
       } finally { clearTimeout(timer); port.removeAllListeners(); }
     }
