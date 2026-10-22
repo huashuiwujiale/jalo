@@ -8,6 +8,7 @@ import type { ModelProvider } from './provider';
 import { createProvider } from './providers';
 import { endEvaluation, type EvaluationReport } from '../shared/evaluation';
 import type { EngineEvent, Settings } from '../shared/types';
+import { contextLimitMessage } from '../shared/model-context';
 
 class EvaluationTools extends ToolRegistry {
   reads = new Set<string>(); rereads = new Set<string>(); wrote = false; commandsDenied = 0;
@@ -48,9 +49,13 @@ export async function runEvaluation(report: EvaluationReport, saved: Settings, h
     if (!instance) throw new Error('当前模型尚未加载。请先加载选定模型，再开始实测；不会自动加载或切换模型。');
     if (model?.toolUse === false) throw new Error('模型服务标记此模型不支持工具调用');
     config.model = instance.id;
+    const configuredContext = config.contextLength;
     config.contextLength = Math.min(config.contextLength, instance.contextLength, model!.maxContext);
     report.instance = instance.id; report.parameters.contextLength = config.contextLength; update(report);
-    if (config.maxTokens >= config.contextLength / 2) throw new Error('已加载模型上下文不足，请降低最大输出或使用更大的上下文重新加载');
+    if (config.maxTokens >= config.contextLength / 2) throw new Error(contextLimitMessage({
+      configured: configuredContext, maximum: model!.maxContext, loaded: instance.contextLength,
+      effective: config.contextLength, output: config.maxTokens, provider: config.provider,
+    }));
     for (const item of report.cases) {
       signal.throwIfAborted();
       item.status = 'running'; item.startedAt = Date.now(); update(report);

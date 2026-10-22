@@ -254,7 +254,7 @@ function App() {
       <div className="sidebar-bottom"><div className="local-badge"><span className="green-dot"/>本地模型 · 本地记录</div><button onClick={() => setSettingsOpen(true)}><Settings2 size={16}/>模型与设置<ChevronRight size={15}/></button></div>
     </aside>
     <main className="workspace">
-      <header className="topbar"><div className="breadcrumb"><Folder size={15}/><span>{project?.name || '选择工作空间'}</span><span className="slash">/</span><strong>{task ? '任务详情' : '新建任务'}</strong></div><button className="model-pill" title="全局默认模型 · 打开模型与设置" onClick={() => setSettingsOpen(true)}><span className={state.settings.model ? 'green-dot' : 'gray-dot'}/><span>{state.settings.model || '连接本地模型'}</span><ChevronDown size={13}/></button></header>
+      <header className="topbar"><div className="breadcrumb"><Folder size={15}/><span>{project?.name || '选择工作空间'}</span><span className="slash">/</span><strong>{task ? '任务详情' : '新建任务'}</strong></div></header>
       <div className="conversation-pane">
       <div className="conversation" key={viewKey(projectId,taskId)} ref={conversation} onScroll={handleConversationScroll} onToggleCapture={event => { if (event.target instanceof HTMLDetailsElement) rememberExpanded(event.target, expanded.current, expandedGroups.current); schedulePosition(); }}
         onWheel={event => { if (event.deltaY < 0) pauseFollowing(); }}

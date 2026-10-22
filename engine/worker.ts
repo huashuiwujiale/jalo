@@ -10,6 +10,7 @@ import { TaskRunner } from './runner';
 import { SteeringInbox } from './steering';
 const steering = new SteeringInbox();
 import { runEvaluation } from './evaluation';
+import { contextLimitMessage } from '../shared/model-context';
 const port = (process as any).parentPort;
 if (!port) throw new Error('任务引擎必须由 Electron utilityProcess 启动');
 const controller = new AbortController();
@@ -63,6 +64,7 @@ port.on('message', async ({ data }: any) => {
     if (!model) throw new Error('选择的模型不存在，请刷新模型列表');
     if (model.toolUse === false) throw new Error('模型服务标记此模型不支持工具调用，请选择其他模型');
     if (settings.thinking && settings.thinking !== 'auto' && !model.thinking) throw new Error('当前模型未报告支持切换思考，请刷新模型列表或使用默认思考模式');
+    const configuredContext = settings.contextLength;
     settings.contextLength = Math.min(settings.contextLength, model.maxContext);
     const instance = model.instances.find(i => i.id === input.model) || model.instances[0];
     if (instance) {
@@ -72,7 +74,10 @@ port.on('message', async ({ data }: any) => {
       emit({ type: 'progress', progress: { phase: 'loading', since: Date.now() } });
       settings.model = await provider.load(model.key, settings.contextLength, controller.signal);
     }
-    if (settings.maxTokens >= settings.contextLength / 2) throw new Error('已加载模型的上下文过小，请卸载后使用更大上下文重新加载，或降低最大输出');
+    if (settings.maxTokens >= settings.contextLength / 2) throw new Error(contextLimitMessage({
+      configured: configuredContext, maximum: model.maxContext, loaded: instance?.contextLength,
+      effective: settings.contextLength, output: settings.maxTokens, provider: settings.provider,
+    }));
     const registry = new ToolRegistry({ managedCommand: approval => new Promise((resolve, reject) => { commandReplies.set(approval.id, { resolve, reject }); emit({ type: 'managed-command', approval }); }), commandStatus: commandId => new Promise((resolve, reject) => { const id = randomUUID(); commandReplies.set(id, { resolve, reject }); emit({ type: 'command-status', id, commandId }); }), root, backupDir, commandDirectory, signal: controller.signal, timeout: settings.commandTimeout, emit, approve, changes: input.changes, mode: run.mode, runId, reviewChanges: input.reviewChanges, checkpoint: change => new Promise<void>((resolve, reject) => { checkpoints.set(change.id, { resolve, reject }); emit({ type: 'checkpoint', checkpoint: change }); }) });
     await new TaskRunner(provider, registry, settings, emit, controller.signal, () => steering.take()).run({ messages: input.messages });
   } catch (error) {
